@@ -50,46 +50,78 @@ impl Ploidy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampleEvidence {
+    depth: u32,
+    allele_depths: Box<[u32]>,
+    allele_quality_sums: Box<[u32]>,
+}
+
+impl SampleEvidence {
+    pub fn new(
+        depth: u32,
+        allele_depths: impl Into<Box<[u32]>>,
+        allele_quality_sums: impl Into<Box<[u32]>>,
+    ) -> Result<Self> {
+        let allele_depths = allele_depths.into();
+        let allele_quality_sums = allele_quality_sums.into();
+        if allele_depths.is_empty() || allele_quality_sums.len() != allele_depths.len() {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
+        Ok(Self {
+            depth,
+            allele_depths,
+            allele_quality_sums,
+        })
+    }
+
+    pub fn empty(allele_count: usize) -> Result<Self> {
+        Self::new(0, vec![0; allele_count], vec![0; allele_count])
+    }
+
+    pub fn allele_depths(&self) -> &[u32] {
+        &self.allele_depths
+    }
+
+    pub fn allele_quality_sums(&self) -> &[u32] {
+        &self.allele_quality_sums
+    }
+
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SampleLikelihood {
     ploidy: Ploidy,
     phred_likelihoods: Option<Box<[u32]>>,
-    depth: u32,
-    allele_depths: Box<[u32]>,
+    evidence: SampleEvidence,
 }
 
 impl SampleLikelihood {
     pub fn observed(
-        allele_count: usize,
         ploidy: Ploidy,
         phred_likelihoods: impl Into<Box<[u32]>>,
-        depth: u32,
-        allele_depths: impl Into<Box<[u32]>>,
+        evidence: SampleEvidence,
     ) -> Result<Self> {
         let phred_likelihoods = phred_likelihoods.into();
-        let allele_depths = allele_depths.into();
-        if allele_depths.len() != allele_count
-            || genotype_count(allele_count, ploidy.get())
-                .is_none_or(|count| count != phred_likelihoods.len())
+        if genotype_count(evidence.allele_depths.len(), ploidy.get())
+            .is_none_or(|count| count != phred_likelihoods.len())
         {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
         Ok(Self {
             ploidy,
             phred_likelihoods: Some(phred_likelihoods),
-            depth,
-            allele_depths,
+            evidence,
         })
     }
 
     pub fn missing(allele_count: usize, ploidy: Ploidy) -> Result<Self> {
-        if allele_count == 0 {
-            return Err(CallError::InvalidLikelihoodDimensions);
-        }
         Ok(Self {
             ploidy,
             phred_likelihoods: None,
-            depth: 0,
-            allele_depths: vec![0; allele_count].into_boxed_slice(),
+            evidence: SampleEvidence::empty(allele_count)?,
         })
     }
 
@@ -101,21 +133,18 @@ impl SampleLikelihood {
         self.phred_likelihoods.as_deref()
     }
 
-    pub fn depth(&self) -> u32 {
-        self.depth
-    }
-
-    pub fn allele_depths(&self) -> &[u32] {
-        &self.allele_depths
+    pub fn evidence(&self) -> &SampleEvidence {
+        &self.evidence
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LikelihoodSite {
     reference_sequence_id: usize,
     position: u64,
     reference: Allele,
     alternates: Box<[Allele]>,
+    allele_quality_sums: Box<[f32]>,
     samples: Box<[SampleLikelihood]>,
 }
 
@@ -125,6 +154,7 @@ impl LikelihoodSite {
         position: u64,
         reference: Allele,
         alternates: impl Into<Box<[Allele]>>,
+        allele_quality_sums: impl Into<Box<[f32]>>,
         samples: impl Into<Box<[SampleLikelihood]>>,
     ) -> Result<Self> {
         let alternates = alternates.into();
@@ -138,9 +168,17 @@ impl LikelihoodSite {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
         let allele_count = alternates.len() + 1;
+        let allele_quality_sums = allele_quality_sums.into();
+        if allele_quality_sums.len() != allele_count
+            || allele_quality_sums
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
         let samples = samples.into();
         if samples.iter().any(|sample| {
-            sample.allele_depths().len() != allele_count
+            sample.evidence().allele_depths().len() != allele_count
                 || sample.phred_likelihoods().is_some_and(|likelihoods| {
                     genotype_count(allele_count, sample.ploidy().get())
                         .is_none_or(|count| count != likelihoods.len())
@@ -153,6 +191,7 @@ impl LikelihoodSite {
             position,
             reference,
             alternates,
+            allele_quality_sums,
             samples,
         })
     }
@@ -171,6 +210,10 @@ impl LikelihoodSite {
 
     pub fn alternates(&self) -> &[Allele] {
         &self.alternates
+    }
+
+    pub fn allele_quality_sums(&self) -> &[f32] {
+        &self.allele_quality_sums
     }
 
     pub fn samples(&self) -> &[SampleLikelihood] {
@@ -196,9 +239,10 @@ mod tests {
     #[test]
     fn sample_dimensions_follow_vcf_genotype_order() {
         let diploid = Ploidy::new(2).unwrap();
-        assert!(SampleLikelihood::observed(3, diploid, [0, 1, 2, 3, 4, 5], 8, [3, 4, 1]).is_ok());
+        let evidence = SampleEvidence::new(8, [3, 4, 1], [30, 40, 10]).unwrap();
+        assert!(SampleLikelihood::observed(diploid, [0, 1, 2, 3, 4, 5], evidence.clone()).is_ok());
         assert_eq!(
-            SampleLikelihood::observed(3, diploid, [0, 1, 2], 8, [3, 4, 1]),
+            SampleLikelihood::observed(diploid, [0, 1, 2], evidence),
             Err(CallError::InvalidLikelihoodDimensions)
         );
         assert_eq!(
@@ -213,11 +257,14 @@ mod tests {
     fn sites_reject_duplicate_alleles() {
         let reference = Allele::new(&b"A"[..]).unwrap();
         let alternate = Allele::new(&b"G"[..]).unwrap();
+        let evidence = SampleEvidence::new(5, [4, 1], [40, 10]).unwrap();
         let sample =
-            SampleLikelihood::observed(2, Ploidy::new(2).unwrap(), [0, 10, 20], 5, [4, 1]).unwrap();
-        assert!(LikelihoodSite::new(0, 9, reference.clone(), [alternate], [sample]).is_ok());
+            SampleLikelihood::observed(Ploidy::new(2).unwrap(), [0, 10, 20], evidence).unwrap();
+        assert!(
+            LikelihoodSite::new(0, 9, reference.clone(), [alternate], [1.0, 0.2], [sample]).is_ok()
+        );
         assert_eq!(
-            LikelihoodSite::new(0, 9, reference.clone(), [reference], []),
+            LikelihoodSite::new(0, 9, reference.clone(), [reference], [1.0, 0.0], []),
             Err(CallError::InvalidLikelihoodDimensions)
         );
     }
@@ -231,6 +278,21 @@ mod tests {
         );
         assert_eq!(
             SampleLikelihood::missing(0, Ploidy::new(2).unwrap()),
+            Err(CallError::InvalidLikelihoodDimensions)
+        );
+        assert_eq!(
+            SampleEvidence::new(1, [1, 0], [20]),
+            Err(CallError::InvalidLikelihoodDimensions)
+        );
+        assert_eq!(
+            LikelihoodSite::new(
+                0,
+                9,
+                Allele::new(&b"A"[..]).unwrap(),
+                [Allele::new(&b"G"[..]).unwrap()],
+                [1.0, f32::NAN],
+                []
+            ),
             Err(CallError::InvalidLikelihoodDimensions)
         );
     }

@@ -262,7 +262,7 @@ mod tests {
         );
         for site in sites {
             assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[0, 3, 40][..]));
-            assert_eq!(site.samples()[0].depth(), 1);
+            assert_eq!(site.samples()[0].evidence().depth(), 1);
         }
     }
 
@@ -335,7 +335,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(sites.len(), 1);
-        assert_eq!(sites[0].samples()[0].depth(), 2);
+        assert_eq!(sites[0].samples()[0].evidence().depth(), 2);
         assert_eq!(
             sites[0].samples()[0].phred_likelihoods(),
             Some(&[0, 6, 73][..])

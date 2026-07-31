@@ -14,11 +14,11 @@ rsomics-call run
 
 The current code establishes coordinate-merged SAM/BAM/CRAM input, multi-input
 sample projection, bounded reference caching, and a streaming SNP likelihood
-path with per-input depth limits and deterministic deep-sample selection. The
-current slice is checked against bcftools and HTSlib 1.24. It does not yet
-expose a command-line binary. Incomplete commands stay absent until the
-complete SNP/indel, BAQ, consensus/multiallelic, VCF/BCF, oracle, and
-performance gates pass.
+path with per-input depth limits, deterministic deep-sample selection, and
+allele-aligned site and sample quality evidence. The current slice is checked
+against bcftools and HTSlib 1.24. It does not yet expose a command-line binary.
+Incomplete commands stay absent until the complete SNP/indel, BAQ,
+consensus/multiallelic, VCF/BCF, oracle, and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample

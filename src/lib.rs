@@ -11,7 +11,7 @@ mod snp;
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
-pub use model::{Allele, LikelihoodSite, Ploidy, SampleLikelihood};
+pub use model::{Allele, LikelihoodSite, Ploidy, SampleEvidence, SampleLikelihood};
 pub use run::SnpLikelihoodRun;
 pub use samples::{SampleMap, SampleMapBuilder, SampleSelection};
 pub use snp::{SnpEvidence, SnpLikelihoodConfig, SnpSiteBuilder};

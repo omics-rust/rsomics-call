@@ -3,7 +3,7 @@ use rsomics_pileup::Column;
 
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, LikelihoodMatrix, LikelihoodSite, Nucleotide,
-    Ploidy, Result, SampleLikelihood,
+    Ploidy, Result, SampleEvidence, SampleLikelihood,
 };
 
 const NUCLEOTIDE: [Nucleotide; 16] = [
@@ -279,13 +279,13 @@ impl SnpSiteBuilder {
                     .iter()
                     .map(|allele| sample.allele_depths()[allele.matrix_base as usize])
                     .collect::<Vec<_>>();
-                SampleLikelihood::observed(
-                    allele_count,
-                    diploid,
-                    phred_likelihoods,
-                    sample.depth(),
-                    allele_depths,
-                )
+                let allele_quality_sums = alleles
+                    .iter()
+                    .map(|allele| sample.quality_sums()[allele.matrix_base as usize])
+                    .collect::<Vec<_>>();
+                let evidence =
+                    SampleEvidence::new(sample.depth(), allele_depths, allele_quality_sums)?;
+                SampleLikelihood::observed(diploid, phred_likelihoods, evidence)
             })
             .collect::<Result<Vec<_>>>()?;
         let reference_sequence_id = usize::try_from(column.reference_id())
@@ -293,13 +293,21 @@ impl SnpSiteBuilder {
         let position =
             u64::try_from(column.position()).map_err(|_| CallError::InvalidPileupCoordinate)?;
         let mut alleles = alleles.into_iter();
-        let reference = alleles.next().unwrap().allele;
-        let alternates = alleles.map(|allele| allele.allele).collect::<Vec<_>>();
+        let reference = alleles.next().unwrap();
+        let reference_quality_sum = reference.quality_sum;
+        let reference = reference.allele;
+        let mut alternates = Vec::new();
+        let mut allele_quality_sums = vec![reference_quality_sum];
+        for allele in alleles {
+            alternates.push(allele.allele);
+            allele_quality_sums.push(allele.quality_sum);
+        }
         LikelihoodSite::new(
             reference_sequence_id,
             position,
             reference,
             alternates,
+            allele_quality_sums,
             samples,
         )
     }
@@ -308,6 +316,7 @@ impl SnpSiteBuilder {
 struct SelectedAllele {
     allele: Allele,
     matrix_base: Nucleotide,
+    quality_sum: f32,
 }
 
 fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Vec<SelectedAllele>> {
@@ -337,6 +346,7 @@ fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Ve
     let mut selected = vec![SelectedAllele {
         allele: Allele::new([nucleotide_byte(reference)])?,
         matrix_base: reference,
+        quality_sum: quality_sums[reference_index],
     }];
     let mut unseen = None;
     for &index in order.iter().rev() {
@@ -351,6 +361,7 @@ fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Ve
         selected.push(SelectedAllele {
             allele: Allele::new([nucleotide_byte(base)])?,
             matrix_base: base,
+            quality_sum: quality_sums[index],
         });
     }
     let can_add_unseen = if reference == Nucleotide::N {
@@ -362,6 +373,7 @@ fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Ve
         selected.push(SelectedAllele {
             allele: Allele::new(&b"<*>"[..])?,
             matrix_base: NUCLEOTIDE[index_to_nibble(index)],
+            quality_sum: quality_sums[index],
         });
     }
     Ok(selected)
@@ -547,8 +559,10 @@ mod tests {
         assert_eq!(site.reference().as_bytes(), b"A");
         assert_eq!(site.alternates()[0].as_bytes(), b"<*>");
         assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[0, 3, 40][..]));
-        assert_eq!(site.samples()[0].depth(), 1);
-        assert_eq!(site.samples()[0].allele_depths(), &[1, 0]);
+        assert_eq!(site.allele_quality_sums(), &[1.0, 0.0]);
+        assert_eq!(site.samples()[0].evidence().depth(), 1);
+        assert_eq!(site.samples()[0].evidence().allele_depths(), &[1, 0]);
+        assert_eq!(site.samples()[0].evidence().allele_quality_sums(), &[40, 0]);
     }
 
     #[test]
@@ -615,8 +629,17 @@ mod tests {
             site.samples()[1].phred_likelihoods(),
             Some(&[40, 3, 0, 40, 3, 40][..])
         );
-        assert_eq!(site.samples()[0].allele_depths(), &[1, 0, 0]);
-        assert_eq!(site.samples()[1].allele_depths(), &[0, 1, 0]);
+        assert_eq!(site.allele_quality_sums(), &[1.0, 1.0, 0.0]);
+        assert_eq!(site.samples()[0].evidence().allele_depths(), &[1, 0, 0]);
+        assert_eq!(site.samples()[1].evidence().allele_depths(), &[0, 1, 0]);
+        assert_eq!(
+            site.samples()[0].evidence().allele_quality_sums(),
+            &[40, 0, 0]
+        );
+        assert_eq!(
+            site.samples()[1].evidence().allele_quality_sums(),
+            &[0, 40, 0]
+        );
     }
 
     #[test]
