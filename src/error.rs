@@ -74,6 +74,12 @@ pub enum CallError {
     #[error("the caller ploidy count differs from the likelihood sample count")]
     CallerPloidyCountMismatch,
 
+    #[error("the caller group count differs from the likelihood sample count")]
+    CallerGroupCountMismatch,
+
+    #[error("caller group indices must be contiguous and nonempty")]
+    InvalidCallerGroups,
+
     #[error("the prior chromosome count is outside the cohort ploidy range")]
     InvalidPriorChromosomeCount,
 

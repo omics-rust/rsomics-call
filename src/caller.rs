@@ -144,6 +144,7 @@ impl MultiallelicCaller {
             site,
             SamplePloidies::Diploid,
             site.samples().len().saturating_mul(2),
+            None,
         )
     }
 
@@ -161,6 +162,29 @@ impl MultiallelicCaller {
             site,
             SamplePloidies::Explicit(ploidies),
             prior_chromosome_count,
+            None,
+        )
+    }
+
+    /// Groups select alleles independently while sharing the output allele record.
+    pub fn call_with_groups(
+        &self,
+        site: &LikelihoodSite,
+        ploidies: &[CallPloidy],
+        prior_chromosome_count: usize,
+        sample_groups: &[usize],
+    ) -> Result<CalledSite> {
+        if ploidies.len() != site.samples().len() {
+            return Err(CallError::CallerPloidyCountMismatch);
+        }
+        if sample_groups.len() != site.samples().len() {
+            return Err(CallError::CallerGroupCountMismatch);
+        }
+        self.call_inner(
+            site,
+            SamplePloidies::Explicit(ploidies),
+            prior_chromosome_count,
+            Some(sample_groups),
         )
     }
 
@@ -169,6 +193,7 @@ impl MultiallelicCaller {
         site: &LikelihoodSite,
         ploidies: SamplePloidies<'_>,
         prior_chromosome_count: usize,
+        sample_groups: Option<&[usize]>,
     ) -> Result<CalledSite> {
         if site
             .samples()
@@ -192,15 +217,19 @@ impl MultiallelicCaller {
             .iter()
             .map(|sample| normalized_likelihoods(sample, genotype_count))
             .collect::<Vec<_>>();
-        let quality_sums = normalized_quality_sums(site.allele_quality_sums());
         let log_prior = adjusted_log_prior(self.config.mutation_rate, prior_chromosome_count);
-        let selection = select_alleles(&likelihoods, &quality_sums, &ploidies, log_prior);
+        let groups = caller_groups(site, sample_groups, &likelihoods, &ploidies, log_prior)?;
         let unseen = site
             .alternates()
             .iter()
             .position(|allele| matches!(allele.as_bytes(), b"<*>" | b"<NON_REF>"))
             .map(|index| index + 1);
-        let mut retained = selection.alleles.clone();
+        let mut retained = vec![false; allele_count];
+        for group in &groups {
+            for (retained, &selected) in retained.iter_mut().zip(&group.selection.alleles) {
+                *retained |= selected;
+            }
+        }
         retained[0] = true;
         if let Some(index) = unseen {
             retained[index] = false;
@@ -215,6 +244,8 @@ impl MultiallelicCaller {
         let mut samples = Vec::with_capacity(site.samples().len());
 
         for (sample_index, sample) in site.samples().iter().enumerate() {
+            let group_index = sample_groups.map_or(0, |groups| groups[sample_index]);
+            let group = &groups[group_index];
             let ploidy = ploidies.get(sample_index);
             if ploidy == CallPloidy::Absent {
                 samples.push(call_absent_sample(sample, &retained)?);
@@ -228,9 +259,9 @@ impl MultiallelicCaller {
             } else {
                 let context = SampleCallContext {
                     likelihoods: &likelihoods[sample_index],
-                    quality_sums: &quality_sums,
+                    quality_sums: &group.quality_sums,
                     retained: &retained,
-                    allowed: &selection.alleles,
+                    allowed: &group.selection.alleles,
                     old_to_new: &old_to_new,
                     ploidy,
                 };
@@ -239,15 +270,26 @@ impl MultiallelicCaller {
         }
 
         let alternate_count = allele_counts[1..].iter().sum::<u32>();
+        let quality_group = groups.iter().fold(None, |best, group| {
+            let Some(quality) = group.selection.maximum_quality else {
+                return best;
+            };
+            match best {
+                Some((_, best_quality)) if best_quality >= quality => best,
+                _ => Some((group, quality)),
+            }
+        });
         let quality = if alternate_count != 0 {
-            selection.maximum_quality
-        } else if selection.alternate_log_sum.is_finite() {
+            quality_group.map(|(_, quality)| quality)
+        } else if let Some((group, _)) = quality_group
+            && group.selection.alternate_log_sum.is_finite()
+        {
             Some(
                 (-SITE_PHRED_SCALE
-                    * (selection.alternate_log_sum
+                    * (group.selection.alternate_log_sum
                         - logsumexp(
-                            selection.alternate_log_sum,
-                            selection.reference_log_likelihood,
+                            group.selection.alternate_log_sum,
+                            group.selection.reference_log_likelihood,
                         ))) as f32,
             )
         } else if allele_counts[0] != 0 {
@@ -304,6 +346,21 @@ impl SamplePloidies<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GroupSamples<'a> {
+    All(usize),
+    Explicit(&'a [usize]),
+}
+
+impl GroupSamples<'_> {
+    fn for_each(self, visit: impl FnMut(usize)) {
+        match self {
+            Self::All(count) => (0..count).for_each(visit),
+            Self::Explicit(indices) => indices.iter().copied().for_each(visit),
+        }
+    }
+}
+
 struct AlleleSelection {
     alleles: Vec<bool>,
     reference_log_likelihood: f64,
@@ -311,10 +368,88 @@ struct AlleleSelection {
     maximum_quality: Option<f32>,
 }
 
+struct GroupCall {
+    quality_sums: Vec<f64>,
+    selection: AlleleSelection,
+}
+
+fn caller_groups(
+    site: &LikelihoodSite,
+    sample_groups: Option<&[usize]>,
+    sample_likelihoods: &[Vec<f64>],
+    ploidies: &SamplePloidies<'_>,
+    log_prior: f64,
+) -> Result<Vec<GroupCall>> {
+    let Some(sample_groups) = sample_groups else {
+        let quality_sums = normalized_quality_sums(site.allele_quality_sums());
+        let selection = select_alleles(
+            sample_likelihoods,
+            &quality_sums,
+            ploidies,
+            GroupSamples::All(site.samples().len()),
+            log_prior,
+        );
+        return Ok(vec![GroupCall {
+            quality_sums,
+            selection,
+        }]);
+    };
+    let maximum_group = sample_groups
+        .iter()
+        .copied()
+        .max()
+        .ok_or(CallError::InvalidCallerGroups)?;
+    if maximum_group >= sample_groups.len() {
+        return Err(CallError::InvalidCallerGroups);
+    }
+    let group_count = maximum_group + 1;
+    let allele_count = site.alternates().len() + 1;
+    let mut members = vec![Vec::new(); group_count];
+    let mut quality_sums = vec![vec![0.0f32; allele_count]; group_count];
+    for (sample_index, (&group, sample)) in sample_groups.iter().zip(site.samples()).enumerate() {
+        members[group].push(sample_index);
+        let values = sample.evidence().allele_quality_sums();
+        let total = values.iter().map(|&value| value as f32).sum::<f32>();
+        if total != 0.0 {
+            for (sum, &value) in quality_sums[group].iter_mut().zip(values) {
+                *sum += value as f32 / total;
+            }
+        }
+    }
+    if members.iter().any(Vec::is_empty) {
+        return Err(CallError::InvalidCallerGroups);
+    }
+    Ok(quality_sums
+        .into_iter()
+        .zip(&members)
+        .map(|(mut quality_sums, members)| {
+            let total = quality_sums.iter().sum::<f32>();
+            if total != 0.0 {
+                for value in &mut quality_sums {
+                    *value /= total;
+                }
+            }
+            let quality_sums = quality_sums.into_iter().map(f64::from).collect::<Vec<_>>();
+            let selection = select_alleles(
+                sample_likelihoods,
+                &quality_sums,
+                ploidies,
+                GroupSamples::Explicit(members),
+                log_prior,
+            );
+            GroupCall {
+                quality_sums,
+                selection,
+            }
+        })
+        .collect())
+}
+
 fn select_alleles(
     sample_likelihoods: &[Vec<f64>],
     quality_sums: &[f64],
     ploidies: &SamplePloidies<'_>,
+    samples: GroupSamples<'_>,
     log_prior: f64,
 ) -> AlleleSelection {
     let allele_count = quality_sums.len();
@@ -327,13 +462,14 @@ fn select_alleles(
         let index = genotype_index(allele, allele);
         let mut total = 0.0;
         let mut supported = false;
-        for likelihoods in sample_likelihoods {
+        samples.for_each(|sample_index| {
+            let likelihoods = &sample_likelihoods[sample_index];
             let value = likelihoods[index];
             if value != 0.0 {
                 total += value.ln();
                 supported = true;
             }
-        }
+        });
         if allele == 0 {
             reference_log_likelihood = total;
         } else {
@@ -361,7 +497,8 @@ fn select_alleles(
             let frequencies = normalized_frequencies(quality_sums, &[first, second]);
             let mut total = 0.0;
             let mut supported = false;
-            for (sample_index, likelihoods) in sample_likelihoods.iter().enumerate() {
+            samples.for_each(|sample_index| {
+                let likelihoods = &sample_likelihoods[sample_index];
                 let ploidy = ploidies.get(sample_index);
                 let value = match ploidy {
                     CallPloidy::Absent => 0.0,
@@ -382,7 +519,7 @@ fn select_alleles(
                     total += value.ln();
                     supported = true;
                 }
-            }
+            });
             if first != 0 {
                 total += log_prior;
             }
@@ -417,7 +554,8 @@ fn select_alleles(
                 let frequencies = normalized_frequencies(quality_sums, &alleles);
                 let mut total = 0.0;
                 let mut supported = false;
-                for (sample_index, likelihoods) in sample_likelihoods.iter().enumerate() {
+                samples.for_each(|sample_index| {
+                    let likelihoods = &sample_likelihoods[sample_index];
                     let ploidy = ploidies.get(sample_index);
                     let mut value = 0.0;
                     for (right, &right_allele) in alleles.iter().enumerate() {
@@ -443,7 +581,7 @@ fn select_alleles(
                         total += value.ln();
                         supported = true;
                     }
-                }
+                });
                 for &allele in &alleles {
                     if allele != 0 {
                         total += log_prior;
@@ -964,6 +1102,35 @@ mod tests {
         assert_eq!(called.samples()[0].genotype_quality(), 127);
         assert_eq!(
             called.samples()[0].genotype_probabilities(),
+            Some(&[0.0, 0.0, 1.0][..])
+        );
+    }
+
+    #[test]
+    fn matches_bcftools_1_24_per_sample_groups() {
+        let site = two_sample_site();
+        let ploidies = [CallPloidy::Diploid, CallPloidy::Diploid];
+
+        assert_eq!(
+            MultiallelicCaller::default().call_with_groups(&site, &ploidies, 4, &[0, 2],),
+            Err(CallError::InvalidCallerGroups)
+        );
+        let called = MultiallelicCaller::default()
+            .call_with_groups(&site, &ploidies, 4, &[0, 1])
+            .unwrap();
+
+        assert_eq!(called.allele_counts(), &[2, 2]);
+        assert!((called.quality().unwrap() - 13.2571).abs() < 1e-4);
+        assert_eq!(called.samples()[0].genotype(), Some(&[0, 0][..]));
+        assert_eq!(called.samples()[1].genotype(), Some(&[1, 1][..]));
+        assert_eq!(called.samples()[0].genotype_quality(), 127);
+        assert_eq!(called.samples()[1].genotype_quality(), 127);
+        assert_eq!(
+            called.samples()[0].genotype_probabilities(),
+            Some(&[1.0, 0.0, 0.0][..])
+        );
+        assert_eq!(
+            called.samples()[1].genotype_probabilities(),
             Some(&[0.0, 0.0, 1.0][..])
         );
     }
