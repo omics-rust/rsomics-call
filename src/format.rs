@@ -431,8 +431,8 @@ impl CalledVcfSchema {
                 }));
                 values.push(
                     sample
-                        .genotype()
-                        .map(|_| SampleValue::Integer(i32::from(sample.genotype_quality()))),
+                        .genotype_quality()
+                        .map(|value| SampleValue::Integer(i32::from(value))),
                 );
                 Ok(values)
             })

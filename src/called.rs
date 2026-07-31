@@ -21,7 +21,7 @@ impl CallPloidy {
 pub struct CalledSample {
     pub(crate) ploidy: CallPloidy,
     pub(crate) genotype: Option<Box<[usize]>>,
-    pub(crate) genotype_quality: u8,
+    pub(crate) genotype_quality: Option<u8>,
     pub(crate) genotype_probabilities: Option<Box<[f32]>>,
     pub(crate) phred_likelihoods: Option<Box<[u32]>>,
     pub(crate) evidence: SampleEvidence,
@@ -36,7 +36,7 @@ impl CalledSample {
         self.genotype.as_deref()
     }
 
-    pub fn genotype_quality(&self) -> u8 {
+    pub fn genotype_quality(&self) -> Option<u8> {
         self.genotype_quality
     }
 

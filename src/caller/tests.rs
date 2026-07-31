@@ -42,8 +42,8 @@ fn matches_bcftools_1_24_two_sample_multiallelic_call() {
     assert!((called.quality().unwrap() - 7.822_08).abs() < 1e-5);
     assert_eq!(called.samples()[0].genotype(), Some(&[0, 1][..]));
     assert_eq!(called.samples()[1].genotype(), Some(&[0, 1][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 3);
-    assert_eq!(called.samples()[1].genotype_quality(), 3);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(3));
+    assert_eq!(called.samples()[1].genotype_quality(), Some(3));
     assert_eq!(
         called.samples()[0].phred_likelihoods(),
         Some(&[0, 3, 40][..])
@@ -108,8 +108,8 @@ fn matches_bcftools_1_24_haploid_call() {
     assert!((called.quality().unwrap() - 5.7423).abs() < 1e-4);
     assert_eq!(called.samples()[0].genotype(), Some(&[0][..]));
     assert_eq!(called.samples()[1].genotype(), Some(&[1][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 40);
-    assert_eq!(called.samples()[1].genotype_quality(), 40);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(40));
+    assert_eq!(called.samples()[1].genotype_quality(), Some(40));
     assert_eq!(called.samples()[0].phred_likelihoods(), Some(&[0, 40][..]));
     assert_eq!(called.samples()[1].phred_likelihoods(), Some(&[40, 0][..]));
     let expected = [[0.9999, 9.999e-5], [9.999e-5, 0.9999]];
@@ -149,8 +149,8 @@ fn matches_bcftools_1_24_mixed_ploidy_call() {
     assert!((quality - 7.817_96).abs() < 1e-5, "{quality}");
     assert_eq!(called.samples()[0].genotype(), Some(&[0][..]));
     assert_eq!(called.samples()[1].genotype(), Some(&[0, 1][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 40);
-    assert_eq!(called.samples()[1].genotype_quality(), 3);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(40));
+    assert_eq!(called.samples()[1].genotype_quality(), Some(3));
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn matches_bcftools_1_24_absent_ploidy_call() {
     assert_eq!(called.samples()[0].phred_likelihoods(), None);
     assert_eq!(called.samples()[0].evidence().allele_depths(), &[1, 0]);
     assert_eq!(called.samples()[1].genotype(), Some(&[0, 1][..]));
-    assert_eq!(called.samples()[1].genotype_quality(), 3);
+    assert_eq!(called.samples()[1].genotype_quality(), Some(3));
     assert_eq!(
         called.samples()[1].phred_likelihoods(),
         Some(&[40, 3, 0][..])
@@ -196,7 +196,7 @@ fn matches_bcftools_1_24_alt_only_selection() {
     assert_eq!(called.allele_counts(), &[0, 2]);
     assert!((called.quality().unwrap() - 10.7923).abs() < 1e-4);
     assert_eq!(called.samples()[0].genotype(), Some(&[1, 1][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 127);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(127));
     assert_eq!(
         called.samples()[0].genotype_probabilities(),
         Some(&[0.0, 0.0, 1.0][..])
@@ -220,8 +220,8 @@ fn matches_bcftools_1_24_per_sample_groups() {
     assert!((called.quality().unwrap() - 13.2571).abs() < 1e-4);
     assert_eq!(called.samples()[0].genotype(), Some(&[0, 0][..]));
     assert_eq!(called.samples()[1].genotype(), Some(&[1, 1][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 127);
-    assert_eq!(called.samples()[1].genotype_quality(), 127);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(127));
+    assert_eq!(called.samples()[1].genotype_quality(), Some(127));
     assert_eq!(
         called.samples()[0].genotype_probabilities(),
         Some(&[1.0, 0.0, 0.0][..])
@@ -256,7 +256,7 @@ fn matches_bcftools_1_24_reference_call() {
     assert!(!called.is_variant());
     assert!((called.quality().unwrap() - 69.587).abs() < 1e-3);
     assert_eq!(called.samples()[0].genotype(), Some(&[0, 0][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 0);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(0));
     assert_eq!(called.samples()[0].genotype_probabilities(), None);
     assert_eq!(called.samples()[0].phred_likelihoods(), None);
     assert_eq!(called.samples()[0].evidence().allele_quality_sums(), &[40]);
@@ -317,9 +317,9 @@ fn matches_bcftools_1_24_triallelic_call() {
     assert_eq!(called.samples()[0].genotype(), Some(&[0, 1][..]));
     assert_eq!(called.samples()[1].genotype(), Some(&[0, 2][..]));
     assert_eq!(called.samples()[2].genotype(), Some(&[0, 1][..]));
-    assert_eq!(called.samples()[0].genotype_quality(), 1);
-    assert_eq!(called.samples()[1].genotype_quality(), 1);
-    assert_eq!(called.samples()[2].genotype_quality(), 1);
+    assert_eq!(called.samples()[0].genotype_quality(), Some(1));
+    assert_eq!(called.samples()[1].genotype_quality(), Some(1));
+    assert_eq!(called.samples()[2].genotype_quality(), Some(1));
     assert_eq!(
         called.samples()[1].phred_likelihoods(),
         Some(&[40, 40, 40, 3, 3, 0][..])

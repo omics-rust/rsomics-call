@@ -552,7 +552,7 @@ fn call_sample(
         return Ok(CalledSample {
             ploidy: context.ploidy,
             genotype: None,
-            genotype_quality: 0,
+            genotype_quality: None,
             genotype_probabilities: None,
             phred_likelihoods,
             evidence,
@@ -642,7 +642,7 @@ fn call_sample(
     Ok(CalledSample {
         ploidy: context.ploidy,
         genotype: Some(genotype.into()),
-        genotype_quality: quality,
+        genotype_quality: Some(quality),
         genotype_probabilities: probabilities,
         phred_likelihoods,
         evidence,
@@ -655,7 +655,7 @@ fn call_absent_sample(sample: &SampleLikelihood, retained: &[usize]) -> Result<C
     Ok(CalledSample {
         ploidy: CallPloidy::Absent,
         genotype: None,
-        genotype_quality: 0,
+        genotype_quality: None,
         genotype_probabilities: None,
         phred_likelihoods,
         evidence,
@@ -678,7 +678,7 @@ fn call_reference_sample(
     Ok(CalledSample {
         ploidy,
         genotype: supported.then(|| vec![0; ploidy.chromosome_count()].into_boxed_slice()),
-        genotype_quality: 0,
+        genotype_quality: Some(0),
         genotype_probabilities: None,
         phred_likelihoods,
         evidence,
