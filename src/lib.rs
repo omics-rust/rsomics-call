@@ -1,6 +1,7 @@
 //! Typed likelihood evidence and calling stages for `rsomics-call`.
 
 mod alignment;
+mod called;
 mod caller;
 mod errmod;
 mod error;
@@ -10,9 +11,8 @@ mod samples;
 mod snp;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
-pub use caller::{
-    CallPloidy, CalledSample, CalledSite, MultiallelicCaller, MultiallelicCallerConfig,
-};
+pub use called::{CallPloidy, CalledSample, CalledSite};
+pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};
 pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use model::{Allele, LikelihoodSite, Ploidy, SampleEvidence, SampleLikelihood};
