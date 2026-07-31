@@ -47,6 +47,12 @@ pub enum CallError {
     #[error("reference dictionary in alignment input {0} differs from the first input")]
     ReferenceDictionaryMismatch(String),
 
+    #[error("reference input {path}: {message}")]
+    ReferenceInput { path: String, message: String },
+
+    #[error(transparent)]
+    Pileup(#[from] rsomics_pileup::PileupError),
+
     #[error("invalid or duplicate read-group ID: {0}")]
     InvalidReadGroup(String),
 

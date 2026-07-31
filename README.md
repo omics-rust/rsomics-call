@@ -13,10 +13,11 @@ rsomics-call run
 ```
 
 The current code establishes coordinate-merged SAM/BAM/CRAM input, multi-input
-sample projection, the typed likelihood boundary, and the SNP error model
-against bcftools and HTSlib 1.24. It does not yet expose a command-line binary.
-Incomplete commands stay absent until the complete SNP/indel, BAQ,
-consensus/multiallelic, VCF/BCF, oracle, and performance gates pass.
+sample projection, bounded reference caching, and a streaming SNP likelihood
+path checked against bcftools and HTSlib 1.24. It does not yet expose a
+command-line binary. Incomplete commands stay absent until the complete
+SNP/indel, BAQ, consensus/multiallelic, VCF/BCF, oracle, and performance gates
+pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
