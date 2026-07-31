@@ -10,26 +10,42 @@ use noodles::{
                 info::{Number as InfoNumber, Type as InfoType},
             },
         },
+        variant::record::samples::series::value::genotype::Phasing,
         variant::record_buf::{
             AlternateBases, Info as RecordInfo, Samples,
             info::field::{Value as InfoValue, value::Array as InfoArray},
             samples::{
                 Keys,
-                sample::{Value as SampleValue, value::Array as SampleArray},
+                sample::{
+                    Value as SampleValue,
+                    value::{Array as SampleArray, Genotype, genotype::Allele as GenotypeAllele},
+                },
             },
         },
     },
 };
 
-use crate::{Allele, CallError, LikelihoodSite, Ploidy, Result, SampleEvidence, SampleLikelihood};
+use crate::{
+    Allele, CallError, CalledSite, LikelihoodSite, Ploidy, Result, SampleEvidence, SampleLikelihood,
+};
 
 const QUALITY_SUM: &str = "QS";
 const PL: &str = "PL";
 const DP: &str = "DP";
 const AD: &str = "AD";
+const AC: &str = "AC";
+const AN: &str = "AN";
+const GT: &str = "GT";
+const GQ: &str = "GQ";
+const GP: &str = "GP";
 
 #[derive(Clone, Debug)]
 pub struct LikelihoodVcfSchema {
+    header: vcf::Header,
+}
+
+#[derive(Clone, Debug)]
+pub struct CalledVcfSchema {
     header: vcf::Header,
 }
 
@@ -270,6 +286,171 @@ impl LikelihoodVcfSchema {
     }
 }
 
+impl CalledVcfSchema {
+    pub fn from_likelihood(schema: &LikelihoodVcfSchema) -> Self {
+        let mut header = schema.header.clone();
+        header.infos_mut().shift_remove(QUALITY_SUM);
+        header.infos_mut().insert(
+            AC.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::AlternateBases,
+                InfoType::Integer,
+                "Allele count in genotypes for each ALT allele, in the same order as listed",
+            ),
+        );
+        header.infos_mut().insert(
+            AN.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::Count(1),
+                InfoType::Integer,
+                "Total number of alleles in called genotypes",
+            ),
+        );
+        header.formats_mut().insert(
+            GT.to_owned(),
+            Map::<Format>::new(FormatNumber::Count(1), FormatType::String, "Genotype"),
+        );
+        header.formats_mut().insert(
+            GQ.to_owned(),
+            Map::<Format>::new(
+                FormatNumber::Count(1),
+                FormatType::Integer,
+                "Phred-scaled Genotype Quality",
+            ),
+        );
+        header.formats_mut().insert(
+            GP.to_owned(),
+            Map::<Format>::new(
+                FormatNumber::Samples,
+                FormatType::Float,
+                "Genotype posterior probabilities in the range 0 to 1",
+            ),
+        );
+        Self { header }
+    }
+
+    pub fn header(&self) -> &vcf::Header {
+        &self.header
+    }
+
+    pub fn encode_call(&self, site: &CalledSite) -> Result<vcf::variant::RecordBuf> {
+        if site.samples().len() != self.header.sample_names().len() {
+            return Err(invalid("record sample count differs from the header"));
+        }
+        let (reference_name, _) = self
+            .header
+            .contigs()
+            .get_index(site.reference_sequence_id())
+            .ok_or_else(|| invalid("reference sequence ID is absent from the header"))?;
+        let position = site
+            .position()
+            .checked_add(1)
+            .and_then(|position| usize::try_from(position).ok())
+            .and_then(|position| Position::try_from(position).ok())
+            .ok_or_else(|| invalid("position exceeds VCF range"))?;
+        let alternate_bases = AlternateBases::from(
+            site.alternates()
+                .iter()
+                .map(|allele| allele_text(allele).map(str::to_owned))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        let allele_counts = site
+            .allele_counts()
+            .iter()
+            .skip(1)
+            .map(|&value| checked_info_integer(value, AC).map(Some))
+            .collect::<Result<Vec<_>>>()?;
+        let mut info = RecordInfo::default();
+        if !allele_counts.is_empty() {
+            info.insert(
+                AC.to_owned(),
+                Some(InfoValue::Array(InfoArray::Integer(allele_counts))),
+            );
+        }
+        info.insert(
+            AN.to_owned(),
+            Some(InfoValue::Integer(
+                i32::try_from(site.allele_number())
+                    .map_err(|_| invalid("INFO/AN exceeds the VCF integer range"))?,
+            )),
+        );
+        let include_dp = self.header.formats().contains_key(DP);
+        let include_ad = self.header.formats().contains_key(AD);
+        let include_qs = self.header.formats().contains_key(QUALITY_SUM);
+        let mut keys = vec![GT.to_owned(), PL.to_owned()];
+        if include_dp {
+            keys.push(DP.to_owned());
+        }
+        if include_ad {
+            keys.push(AD.to_owned());
+        }
+        if include_qs {
+            keys.push(QUALITY_SUM.to_owned());
+        }
+        keys.extend([GP.to_owned(), GQ.to_owned()]);
+        let keys = Keys::from_iter(keys);
+        let values = site
+            .samples()
+            .iter()
+            .map(|sample| {
+                let genotype = sample.genotype().map(|alleles| {
+                    Genotype::from_iter(
+                        alleles
+                            .iter()
+                            .copied()
+                            .map(|allele| GenotypeAllele::new(Some(allele), Phasing::Unphased)),
+                    )
+                });
+                let evidence = sample.evidence();
+                let mut values = vec![
+                    genotype.map(SampleValue::Genotype),
+                    sample
+                        .phred_likelihoods()
+                        .map(|values| checked_array(values, PL))
+                        .transpose()?,
+                ];
+                if include_dp {
+                    values.push(Some(SampleValue::Integer(checked_integer(
+                        evidence.depth(),
+                        DP,
+                    )?)));
+                }
+                if include_ad {
+                    values.push(Some(checked_array(evidence.allele_depths(), AD)?));
+                }
+                if include_qs {
+                    values.push(Some(checked_array(
+                        evidence.allele_quality_sums(),
+                        QUALITY_SUM,
+                    )?));
+                }
+                values.push(sample.genotype_probabilities().map(|values| {
+                    SampleValue::Array(SampleArray::Float(
+                        values.iter().copied().map(Some).collect(),
+                    ))
+                }));
+                values.push(
+                    sample
+                        .genotype()
+                        .map(|_| SampleValue::Integer(i32::from(sample.genotype_quality()))),
+                );
+                Ok(values)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut builder = vcf::variant::RecordBuf::builder()
+            .set_reference_sequence_name(reference_name)
+            .set_variant_start(position)
+            .set_reference_bases(allele_text(site.reference())?)
+            .set_alternate_bases(alternate_bases)
+            .set_info(info)
+            .set_samples(Samples::new(keys, values));
+        if let Some(quality) = site.quality() {
+            builder = builder.set_quality_score(quality);
+        }
+        Ok(builder.build())
+    }
+}
+
 fn require_info(header: &vcf::Header, key: &str, number: InfoNumber, ty: InfoType) -> Result<()> {
     let value = header
         .infos()
@@ -408,6 +589,10 @@ fn checked_integer(value: u32, key: &str) -> Result<i32> {
     i32::try_from(value).map_err(|_| invalid(format!("FORMAT/{key} exceeds the VCF integer range")))
 }
 
+fn checked_info_integer(value: u32, key: &str) -> Result<i32> {
+    i32::try_from(value).map_err(|_| invalid(format!("INFO/{key} exceeds the VCF integer range")))
+}
+
 fn allele_text(allele: &Allele) -> Result<&str> {
     std::str::from_utf8(allele.as_bytes()).map_err(|_| invalid("allele is not UTF-8"))
 }
@@ -417,162 +602,4 @@ fn invalid(message: impl Into<String>) -> CallError {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use noodles::vcf::variant::io::Write as _;
-
-    use super::*;
-
-    #[test]
-    fn decodes_bcftools_1_24_likelihood_record() {
-        let data = include_bytes!("../tests/golden/bcftools-1.24-likelihood.vcf");
-        let mut reader = vcf::io::Reader::new(&data[..]);
-        let header = reader.read_header().unwrap();
-        let schema = LikelihoodVcfSchema::from_header(header.clone()).unwrap();
-        let mut record = vcf::variant::RecordBuf::default();
-        assert_ne!(reader.read_record_buf(&header, &mut record).unwrap(), 0);
-
-        let site = schema.decode_likelihood(&record).unwrap();
-
-        assert_eq!(site.reference_sequence_id(), 0);
-        assert_eq!(site.position(), 0);
-        assert_eq!(site.reference().as_bytes(), b"A");
-        assert_eq!(
-            site.alternates()
-                .iter()
-                .map(Allele::as_bytes)
-                .collect::<Vec<_>>(),
-            [b"G".as_slice(), b"C".as_slice(), b"<*>".as_slice()]
-        );
-        assert_eq!(site.allele_quality_sums(), &[1.0, 1.0, 1.0, 0.0]);
-        assert_eq!(site.samples().len(), 3);
-        assert_eq!(site.samples()[0].evidence().depth(), 1);
-        assert_eq!(site.samples()[1].evidence().allele_depths(), &[0, 0, 1, 0]);
-        assert_eq!(
-            site.samples()[2].evidence().allele_quality_sums(),
-            &[0, 40, 0, 0]
-        );
-        assert_eq!(
-            site.samples()[1].phred_likelihoods(),
-            Some(&[40, 40, 40, 3, 3, 0, 40, 40, 3, 40][..])
-        );
-        let called = crate::MultiallelicCaller::default().call(&site).unwrap();
-        assert_eq!(called.allele_counts(), &[3, 2, 1]);
-        assert!((called.quality().unwrap() - 15.6934).abs() < 1e-4);
-
-        let encoded = schema.encode_likelihood(&site).unwrap();
-        assert_eq!(schema.decode_likelihood(&encoded).unwrap(), site);
-
-        let mut vcf_data = Vec::new();
-        let mut vcf_writer = vcf::io::Writer::new(&mut vcf_data);
-        vcf_writer.write_header(schema.header()).unwrap();
-        vcf_writer
-            .write_variant_record(schema.header(), &encoded)
-            .unwrap();
-        assert_eq!(
-            std::str::from_utf8(&vcf_data)
-                .unwrap()
-                .lines()
-                .last()
-                .unwrap(),
-            "chr1\t1\t.\tA\tG,C,<*>\t.\t.\tQS=1,1,1,0\tPL:DP:AD:QS\t0,3,40,3,40,40,3,40,40,40:1:1,0,0,0:40,0,0,0\t40,40,40,3,3,0,40,40,3,40:1:0,0,1,0:0,0,40,0\t40,3,0,40,3,40,40,3,40,40:1:0,1,0,0:0,40,0,0"
-        );
-        let mut vcf_reader = vcf::io::Reader::new(&vcf_data[..]);
-        let vcf_header = vcf_reader.read_header().unwrap();
-        let vcf_schema = LikelihoodVcfSchema::from_header(vcf_header.clone()).unwrap();
-        let mut vcf_record = vcf::variant::RecordBuf::default();
-        vcf_reader
-            .read_record_buf(&vcf_header, &mut vcf_record)
-            .unwrap();
-        assert_eq!(vcf_schema.decode_likelihood(&vcf_record).unwrap(), site);
-
-        let mut bcf_data = Vec::new();
-        let mut bcf_writer = noodles::bcf::io::Writer::from(&mut bcf_data);
-        bcf_writer.write_header(schema.header()).unwrap();
-        bcf_writer
-            .write_variant_record(schema.header(), &encoded)
-            .unwrap();
-        let mut bcf_reader = noodles::bcf::io::Reader::from(&bcf_data[..]);
-        let bcf_header = bcf_reader.read_header().unwrap();
-        let bcf_schema = LikelihoodVcfSchema::from_header(bcf_header.clone()).unwrap();
-        let mut bcf_record = vcf::variant::RecordBuf::default();
-        bcf_reader
-            .read_record_buf(&bcf_header, &mut bcf_record)
-            .unwrap();
-        assert_eq!(bcf_schema.decode_likelihood(&bcf_record).unwrap(), site);
-    }
-
-    #[test]
-    fn builds_a_checked_likelihood_header() {
-        let references = [(b"chr1".as_slice(), 5)];
-        let schema = LikelihoodVcfSchema::new(references, ["s1", "s2"]).unwrap();
-
-        assert_eq!(
-            schema.header().file_format(),
-            vcf::header::FileFormat::new(4, 2)
-        );
-        assert_eq!(schema.header().contigs().len(), 1);
-        assert_eq!(schema.header().sample_names().len(), 2);
-        assert!(schema.header().infos().contains_key(QUALITY_SUM));
-        assert!(schema.header().formats().contains_key(PL));
-        assert!(schema.header().formats().contains_key(DP));
-        assert!(schema.header().formats().contains_key(AD));
-    }
-
-    #[test]
-    fn rejects_incompatible_likelihood_schema() {
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-        let data = std::fs::read(fixtures.join("bcftools-1.24-likelihood.vcf")).unwrap();
-        let mut reader = vcf::io::Reader::new(&data[..]);
-        let mut header = reader.read_header().unwrap();
-        header.infos_mut().shift_remove(QUALITY_SUM);
-
-        assert_eq!(
-            LikelihoodVcfSchema::from_header(header).unwrap_err(),
-            invalid("header has no INFO/QS definition")
-        );
-    }
-
-    #[test]
-    fn preserves_mixed_ploidy_likelihoods_in_bcf() {
-        let schema =
-            LikelihoodVcfSchema::new([(b"chr1".as_slice(), 5)], ["haploid", "diploid"]).unwrap();
-        let site = LikelihoodSite::new(
-            0,
-            0,
-            Allele::new(&b"A"[..]).unwrap(),
-            [Allele::new(&b"G"[..]).unwrap()],
-            [1.0, 1.0],
-            [
-                SampleLikelihood::observed(
-                    Ploidy::new(1).unwrap(),
-                    [0, 40],
-                    SampleEvidence::new(1, [1, 0], [40, 0]).unwrap(),
-                )
-                .unwrap(),
-                SampleLikelihood::observed(
-                    Ploidy::new(2).unwrap(),
-                    [40, 3, 0],
-                    SampleEvidence::new(1, [0, 1], [0, 40]).unwrap(),
-                )
-                .unwrap(),
-            ],
-        )
-        .unwrap();
-        let encoded = schema.encode_likelihood(&site).unwrap();
-        let mut data = Vec::new();
-        let mut writer = noodles::bcf::io::Writer::from(&mut data);
-        writer.write_header(schema.header()).unwrap();
-        writer
-            .write_variant_record(schema.header(), &encoded)
-            .unwrap();
-        let mut reader = noodles::bcf::io::Reader::from(&data[..]);
-        let header = reader.read_header().unwrap();
-        let decoded_schema = LikelihoodVcfSchema::from_header(header.clone()).unwrap();
-        let mut record = vcf::variant::RecordBuf::default();
-        reader.read_record_buf(&header, &mut record).unwrap();
-
-        assert_eq!(decoded_schema.decode_likelihood(&record).unwrap(), site);
-    }
-}
+mod tests;

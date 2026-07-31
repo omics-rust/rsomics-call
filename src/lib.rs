@@ -16,7 +16,7 @@ pub use called::{CallPloidy, CalledSample, CalledSite};
 pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};
 pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
-pub use format::LikelihoodVcfSchema;
+pub use format::{CalledVcfSchema, LikelihoodVcfSchema};
 pub use model::{Allele, LikelihoodSite, Ploidy, SampleEvidence, SampleLikelihood};
 pub use run::SnpLikelihoodRun;
 pub use samples::{SampleMap, SampleMapBuilder, SampleSelection};
