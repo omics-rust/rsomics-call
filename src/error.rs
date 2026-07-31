@@ -64,6 +64,15 @@ pub enum CallError {
 
     #[error("SNP evidence exceeds the supported count range")]
     SnpEvidenceOverflow,
+
+    #[error("multiallelic mutation rate must be finite and between zero and one")]
+    InvalidMutationRate,
+
+    #[error("the multiallelic caller currently requires diploid likelihoods")]
+    UnsupportedCallerPloidy,
+
+    #[error("called allele count exceeds the supported range")]
+    CalledAlleleCountOverflow,
 }
 
 pub type Result<T> = std::result::Result<T, CallError>;

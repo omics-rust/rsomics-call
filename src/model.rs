@@ -99,30 +99,34 @@ pub struct SampleLikelihood {
 }
 
 impl SampleLikelihood {
+    pub fn new(
+        ploidy: Ploidy,
+        phred_likelihoods: Option<Box<[u32]>>,
+        evidence: SampleEvidence,
+    ) -> Result<Self> {
+        if phred_likelihoods.as_ref().is_some_and(|likelihoods| {
+            genotype_count(evidence.allele_depths.len(), ploidy.get())
+                .is_none_or(|count| count != likelihoods.len())
+        }) {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
+        Ok(Self {
+            ploidy,
+            phred_likelihoods,
+            evidence,
+        })
+    }
+
     pub fn observed(
         ploidy: Ploidy,
         phred_likelihoods: impl Into<Box<[u32]>>,
         evidence: SampleEvidence,
     ) -> Result<Self> {
-        let phred_likelihoods = phred_likelihoods.into();
-        if genotype_count(evidence.allele_depths.len(), ploidy.get())
-            .is_none_or(|count| count != phred_likelihoods.len())
-        {
-            return Err(CallError::InvalidLikelihoodDimensions);
-        }
-        Ok(Self {
-            ploidy,
-            phred_likelihoods: Some(phred_likelihoods),
-            evidence,
-        })
+        Self::new(ploidy, Some(phred_likelihoods.into()), evidence)
     }
 
     pub fn missing(allele_count: usize, ploidy: Ploidy) -> Result<Self> {
-        Ok(Self {
-            ploidy,
-            phred_likelihoods: None,
-            evidence: SampleEvidence::empty(allele_count)?,
-        })
+        Self::new(ploidy, None, SampleEvidence::empty(allele_count)?)
     }
 
     pub fn ploidy(&self) -> Ploidy {
