@@ -12,6 +12,7 @@ mod indel;
 mod model;
 mod run;
 mod samples;
+mod selection;
 mod snp;
 mod stream;
 

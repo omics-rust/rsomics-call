@@ -224,7 +224,7 @@ fn indel_likelihoods_match_bcftools_1_24() {
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
-fn indexed_regions_match_bcftools_1_24() {
+fn indexed_regions_and_streaming_targets_match_bcftools_1_24() {
     assert_bcftools_1_24();
     let directory = tempfile::tempdir().unwrap();
     let reference = write_reference(directory.path(), "ACGTACGTACG");
@@ -243,11 +243,20 @@ fn indexed_regions_match_bcftools_1_24() {
         "second\t0\tMX\t6\t60\t3M\t*\t0\t0\tCAT\tIII\tRG:Z:rg\n",
     );
     let regions = "MX:3-5,MX:7-8";
+    let targets = "MX:4-4,MX:7-8";
 
     let output = Command::new(bcftools())
         .args(["mpileup", "-B", "-f"])
         .arg(&reference)
-        .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-r", regions, "-Ov"])
+        .args([
+            "-a",
+            "FORMAT/DP,FORMAT/AD,FORMAT/QS",
+            "-r",
+            regions,
+            "-t",
+            targets,
+            "-Ov",
+        ])
         .args([&first, &second])
         .output()
         .unwrap();
@@ -268,7 +277,49 @@ fn indexed_regions_match_bcftools_1_24() {
         PileupOptions::default(),
         SnpLikelihoodConfig::default(),
     )
+    .unwrap()
+    .with_targets(["MX:8-8", "MX:4-4", "MX:7-7"].map(|region| region.parse().unwrap()));
+    let mut actual = Vec::new();
+    run.run(|site| {
+        actual.push(site);
+        Ok(())
+    })
     .unwrap();
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn unindexed_streaming_targets_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = write_reference(directory.path(), "ACGTACGTACG");
+    let input = write_alignment(directory.path(), "input", "S1", 11, "11M", "ACGTACGTACG");
+    let targets = "MX:2-3,MX:7-8";
+
+    let output = Command::new(bcftools())
+        .args(["mpileup", "-B", "-f"])
+        .arg(&reference)
+        .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-t", targets, "-Ov"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = decode_likelihoods(&output.stdout);
+    let run = SnpLikelihoodRun::open(
+        [AlignmentInput::new(1, input, "input")],
+        reference,
+        SampleSelection::default(),
+        PileupOptions::default(),
+        SnpLikelihoodConfig::default(),
+    )
+    .unwrap()
+    .with_targets(["MX:7-8", "MX:2-2", "MX:3-3"].map(|region| region.parse().unwrap()));
     let mut actual = Vec::new();
     run.run(|site| {
         actual.push(site);

@@ -18,15 +18,18 @@ with per-input depth limits, deterministic deep-sample selection, and
 allele-aligned site and sample quality evidence. Indexed region input merges
 records across samples by coordinate, sorts selections by alignment-header
 order, merges overlapping or adjacent intervals, and emits each selected site
-once. The library includes full and partial BAQ, insertion and
+once. Streaming inclusion targets require no alignment index, normalize
+overlapping selections, preserve alignment order, and intersect with indexed
+regions when both are present. The library includes full and partial BAQ,
+insertion and
 deletion likelihoods, sample-specific reference consensus, glocal realignment,
 STR penalties, typed indel annotations, zero-copy, haploid, diploid, and
 independently grouped multiallelic calls, a fused typed calling path, and strict
 likelihood and called-record streams for plain VCF, BGZF VCF, raw BCF, and BGZF
 BCF. These paths are checked against bcftools and HTSlib 1.24. It does not yet
 expose a command-line binary. Incomplete commands stay absent until consensus
-annotations, streaming target selection, gVCF behavior, complete command
-orchestration, and oracle and performance gates pass.
+annotations, target-file and exclusion behavior, gVCF behavior, complete
+command orchestration, and oracle and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
