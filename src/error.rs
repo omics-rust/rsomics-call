@@ -50,6 +50,9 @@ pub enum CallError {
     #[error("invalid alignment region {region}: {message}")]
     InvalidRegion { region: String, message: String },
 
+    #[error("at least one alignment region is required")]
+    MissingRegions,
+
     #[error("reference input {path}: {message}")]
     ReferenceInput { path: String, message: String },
 

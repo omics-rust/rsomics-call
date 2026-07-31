@@ -224,7 +224,7 @@ fn indel_likelihoods_match_bcftools_1_24() {
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
-fn indexed_region_likelihoods_match_bcftools_1_24() {
+fn indexed_regions_match_bcftools_1_24() {
     assert_bcftools_1_24();
     let directory = tempfile::tempdir().unwrap();
     let reference = write_reference(directory.path(), "ACGTACGTACG");
@@ -242,12 +242,12 @@ fn indexed_region_likelihoods_match_bcftools_1_24() {
         11,
         "second\t0\tMX\t6\t60\t3M\t*\t0\t0\tCAT\tIII\tRG:Z:rg\n",
     );
-    let region = "MX:3-7";
+    let regions = "MX:3-5,MX:7-8";
 
     let output = Command::new(bcftools())
         .args(["mpileup", "-B", "-f"])
         .arg(&reference)
-        .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-r", region, "-Ov"])
+        .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-r", regions, "-Ov"])
         .args([&first, &second])
         .output()
         .unwrap();
@@ -257,14 +257,14 @@ fn indexed_region_likelihoods_match_bcftools_1_24() {
         String::from_utf8_lossy(&output.stderr)
     );
     let expected = decode_likelihoods(&output.stdout);
-    let run = SnpLikelihoodRun::open_region(
+    let run = SnpLikelihoodRun::open_regions(
         [
             AlignmentInput::new(1, first, "first"),
             AlignmentInput::new(2, second, "second"),
         ],
         reference,
         SampleSelection::default(),
-        region.parse().unwrap(),
+        ["MX:7-8", "MX:4-5", "MX:3-4", "MX:3-4"].map(|region| region.parse().unwrap()),
         PileupOptions::default(),
         SnpLikelihoodConfig::default(),
     )
