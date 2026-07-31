@@ -53,6 +53,16 @@ pub enum CallError {
     #[error("at least one alignment region is required")]
     MissingRegions,
 
+    #[error("target input {path}: {message}")]
+    TargetInput { path: String, message: String },
+
+    #[error("target input {path} line {line}: {message}")]
+    TargetRecord {
+        path: String,
+        line: u64,
+        message: String,
+    },
+
     #[error("reference input {path}: {message}")]
     ReferenceInput { path: String, message: String },
 

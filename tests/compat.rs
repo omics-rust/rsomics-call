@@ -296,36 +296,55 @@ fn unindexed_streaming_targets_match_bcftools_1_24() {
     let directory = tempfile::tempdir().unwrap();
     let reference = write_reference(directory.path(), "ACGTACGTACG");
     let input = write_alignment(directory.path(), "input", "S1", 11, "11M", "ACGTACGTACG");
-    let targets = "MX:2-3,MX:7-8";
-
-    let output = Command::new(bcftools())
-        .args(["mpileup", "-B", "-f"])
-        .arg(&reference)
-        .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-t", targets, "-Ov"])
-        .arg(&input)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected = decode_likelihoods(&output.stdout);
-    let run = SnpLikelihoodRun::open(
-        [AlignmentInput::new(1, input, "input")],
-        reference,
-        SampleSelection::default(),
-        PileupOptions::default(),
-        SnpLikelihoodConfig::default(),
+    let bed = directory.path().join("targets.bed");
+    fs::write(&bed, b"MX\t1\t3\nMX\t6\t8\n").unwrap();
+    let tab = directory.path().join("targets.txt");
+    fs::write(&tab, b"MX\t2\t3\nMX\t7\t8\n").unwrap();
+    let vcf = directory.path().join("targets.vcf");
+    fs::write(
+        &vcf,
+        b"##fileformat=VCFv4.3\n\
+          #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+          MX\t2\t.\tC\t.\t.\t.\t.\n\
+          MX\t3\t.\tG\t.\t.\t.\t.\n\
+          MX\t7\t.\tG\t.\t.\t.\t.\n\
+          MX\t8\t.\tT\t.\t.\t.\t.\n",
     )
-    .unwrap()
-    .with_targets(["MX:7-8", "MX:2-2", "MX:3-3"].map(|region| region.parse().unwrap()));
-    let mut actual = Vec::new();
-    run.run(|site| {
-        actual.push(site);
-        Ok(())
-    })
     .unwrap();
 
-    assert_eq!(actual, expected);
+    for targets in [bed, tab, vcf] {
+        let output = Command::new(bcftools())
+            .args(["mpileup", "-B", "-f"])
+            .arg(&reference)
+            .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-T"])
+            .arg(&targets)
+            .arg("-Ov")
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = decode_likelihoods(&output.stdout);
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, &input, "input")],
+            &reference,
+            SampleSelection::default(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_target_file(&targets)
+        .unwrap();
+        let mut actual = Vec::new();
+        run.run(|site| {
+            actual.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(actual, expected, "{}", targets.display());
+    }
 }

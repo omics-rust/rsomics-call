@@ -15,6 +15,7 @@ mod samples;
 mod selection;
 mod snp;
 mod stream;
+mod target_file;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use called::{CallPloidy, CalledSample, CalledSite};

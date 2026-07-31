@@ -179,6 +179,10 @@ impl SnpLikelihoodRun {
         self
     }
 
+    pub fn with_target_file(self, path: impl AsRef<Path>) -> Result<Self> {
+        Ok(self.with_targets(crate::target_file::read(path.as_ref())?))
+    }
+
     fn set_baq(&mut self, mode: BaqMode, maximum_read_len: usize, redo: bool) {
         self.baq = Some(BaqRun {
             mode,

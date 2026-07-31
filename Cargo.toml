@@ -16,6 +16,7 @@ readme = "README.md"
 doctest = false
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 noodles = { version = "0.110", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "vcf"] }
 noodles-util = { version = "0.79", features = ["variant"] }
 rsomics-bamio = "0.3"
