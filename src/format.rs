@@ -39,6 +39,7 @@ impl LikelihoodVcfSchema {
         sample_names: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Self> {
         let mut builder = vcf::Header::builder()
+            .set_file_format(vcf::header::FileFormat::new(4, 2))
             .add_alternative_allele(
                 "*",
                 Map::<AlternativeAllele>::new("Represents allele(s) other than observed."),
@@ -507,6 +508,10 @@ mod tests {
         let references = [(b"chr1".as_slice(), 5)];
         let schema = LikelihoodVcfSchema::new(references, ["s1", "s2"]).unwrap();
 
+        assert_eq!(
+            schema.header().file_format(),
+            vcf::header::FileFormat::new(4, 2)
+        );
         assert_eq!(schema.header().contigs().len(), 1);
         assert_eq!(schema.header().sample_names().len(), 2);
         assert!(schema.header().infos().contains_key(QUALITY_SUM));
