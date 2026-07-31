@@ -23,6 +23,27 @@ pub enum CallError {
     #[error("sample index {index} is outside the configured sample count {count}")]
     InvalidSampleIndex { index: usize, count: usize },
 
+    #[error("invalid sample name: {0}")]
+    InvalidSampleName(String),
+
+    #[error("sample selection contains a duplicate name: {0}")]
+    DuplicateSampleSelection(String),
+
+    #[error("selected sample is absent from all inputs: {0}")]
+    MissingSelectedSample(String),
+
+    #[error("alignment source ID {0} is duplicated")]
+    DuplicateAlignmentSource(u32),
+
+    #[error("alignment source ID {0} is unknown")]
+    UnknownAlignmentSource(u32),
+
+    #[error("invalid or duplicate read-group ID: {0}")]
+    InvalidReadGroup(String),
+
+    #[error("BAM RG field is not a valid Z string")]
+    InvalidReadGroupField,
+
     #[error("pileup column has an invalid reference coordinate")]
     InvalidPileupCoordinate,
 

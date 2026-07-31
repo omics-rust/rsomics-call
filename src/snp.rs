@@ -380,6 +380,7 @@ mod tests {
     use rsomics_pileup::{PileupEngine, PileupOptions};
 
     use super::*;
+    use crate::{SampleMapBuilder, SampleSelection};
 
     struct RecordSpec<'a> {
         name: &'a [u8],
@@ -564,18 +565,24 @@ mod tests {
         engine.push_with_source(8, alternate).unwrap();
         engine.finish().unwrap();
 
-        let mut builder = SnpSiteBuilder::new(2, SnpLikelihoodConfig::default()).unwrap();
+        let mut sample_builder = SampleMapBuilder::new(SampleSelection::default());
+        sample_builder
+            .add_source(7, "S1", true, Vec::<(&[u8], &str)>::new())
+            .unwrap();
+        sample_builder
+            .add_source(8, "S2", true, Vec::<(&[u8], &str)>::new())
+            .unwrap();
+        let sample_map = sample_builder.finish().unwrap();
+        let mut builder =
+            SnpSiteBuilder::new(sample_map.samples().len(), SnpLikelihoodConfig::default())
+                .unwrap();
         let mut site = None;
         engine
             .drain(|column| {
                 site = Some(
                     builder
-                        .build(column, Nucleotide::A, |source, _| {
-                            Ok(Some(match source {
-                                7 => 0,
-                                8 => 1,
-                                _ => unreachable!(),
-                            }))
+                        .build(column, Nucleotide::A, |source, record| {
+                            sample_map.sample_index(source, record)
                         })
                         .unwrap(),
                 );
