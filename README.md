@@ -12,8 +12,9 @@ rsomics-call call
 rsomics-call run
 ```
 
-The current code establishes the typed likelihood boundary and the SNP error
-model against HTSlib 1.24. It does not yet expose a command-line binary.
+The current code establishes the typed likelihood boundary, multi-input sample
+projection, and SNP error model against bcftools and HTSlib 1.24. It does not
+yet expose a command-line binary.
 Incomplete commands stay absent until the complete multi-input, SNP/indel,
 BAQ, consensus/multiallelic, VCF/BCF, oracle, and performance gates pass.
 

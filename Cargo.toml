@@ -16,8 +16,6 @@ readme = "README.md"
 doctest = false
 
 [dependencies]
-rsomics-pileup = { version = "0.2", git = "https://github.com/omics-rust/rsomics-pileup", rev = "2b2cb7071381bb4c86e8a7068f76c96b7035e1dd" }
-thiserror = "2"
-
-[dev-dependencies]
 rsomics-bamio = "0.2"
+rsomics-pileup = { version = "0.2", git = "https://github.com/omics-rust/rsomics-pileup", rev = "0d4414364d5958980ba6c4962673ad256580f1ef" }
+thiserror = "2"

@@ -17,6 +17,18 @@ pub enum CallError {
     #[error("minimum base quality cannot exceed maximum base quality")]
     InvalidSnpQualityRange,
 
+    #[error("at least one sample is required")]
+    InvalidSampleCount,
+
+    #[error("sample index {index} is outside the configured sample count {count}")]
+    InvalidSampleIndex { index: usize, count: usize },
+
+    #[error("pileup column has an invalid reference coordinate")]
+    InvalidPileupCoordinate,
+
+    #[error("SNP evidence exceeds the supported count range")]
+    SnpEvidenceOverflow,
+
     #[error("the MAQ error model accepts at most 255 observations per sample")]
     ErrorModelDepth,
 }

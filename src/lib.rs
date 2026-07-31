@@ -8,4 +8,4 @@ mod snp;
 pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use model::{Allele, LikelihoodSite, Ploidy, SampleLikelihood};
-pub use snp::{SnpEvidence, SnpLikelihoodConfig};
+pub use snp::{SnpEvidence, SnpLikelihoodConfig, SnpSiteBuilder};
