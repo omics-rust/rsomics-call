@@ -288,6 +288,14 @@ impl LikelihoodVcfSchema {
 
 impl CalledVcfSchema {
     pub fn from_likelihood(schema: &LikelihoodVcfSchema) -> Self {
+        Self::from_likelihood_inner(schema, true)
+    }
+
+    pub fn from_consensus_likelihood(schema: &LikelihoodVcfSchema) -> Self {
+        Self::from_likelihood_inner(schema, false)
+    }
+
+    fn from_likelihood_inner(schema: &LikelihoodVcfSchema, include_probabilities: bool) -> Self {
         let mut header = schema.header.clone();
         header.infos_mut().shift_remove(QUALITY_SUM);
         header.infos_mut().insert(
@@ -318,14 +326,18 @@ impl CalledVcfSchema {
                 "Phred-scaled Genotype Quality",
             ),
         );
-        header.formats_mut().insert(
-            GP.to_owned(),
-            Map::<Format>::new(
-                FormatNumber::Samples,
-                FormatType::Float,
-                "Genotype posterior probabilities in the range 0 to 1",
-            ),
-        );
+        if include_probabilities {
+            header.formats_mut().insert(
+                GP.to_owned(),
+                Map::<Format>::new(
+                    FormatNumber::Samples,
+                    FormatType::Float,
+                    "Genotype posterior probabilities in the range 0 to 1",
+                ),
+            );
+        } else {
+            header.formats_mut().shift_remove(GP);
+        }
         Self { header }
     }
 
@@ -377,6 +389,8 @@ impl CalledVcfSchema {
         let include_dp = self.header.formats().contains_key(DP);
         let include_ad = self.header.formats().contains_key(AD);
         let include_qs = self.header.formats().contains_key(QUALITY_SUM);
+        let include_gp = self.header.formats().contains_key(GP);
+        let include_gq = self.header.formats().contains_key(GQ);
         let mut keys = vec![GT.to_owned(), PL.to_owned()];
         if include_dp {
             keys.push(DP.to_owned());
@@ -387,7 +401,12 @@ impl CalledVcfSchema {
         if include_qs {
             keys.push(QUALITY_SUM.to_owned());
         }
-        keys.extend([GP.to_owned(), GQ.to_owned()]);
+        if include_gp {
+            keys.push(GP.to_owned());
+        }
+        if include_gq {
+            keys.push(GQ.to_owned());
+        }
         let keys = Keys::from_iter(keys);
         let values = site
             .samples()
@@ -424,16 +443,20 @@ impl CalledVcfSchema {
                         QUALITY_SUM,
                     )?));
                 }
-                values.push(sample.genotype_probabilities().map(|values| {
-                    SampleValue::Array(SampleArray::Float(
-                        values.iter().copied().map(Some).collect(),
-                    ))
-                }));
-                values.push(
-                    sample
-                        .genotype_quality()
-                        .map(|value| SampleValue::Integer(i32::from(value))),
-                );
+                if include_gp {
+                    values.push(sample.genotype_probabilities().map(|values| {
+                        SampleValue::Array(SampleArray::Float(
+                            values.iter().copied().map(Some).collect(),
+                        ))
+                    }));
+                }
+                if include_gq {
+                    values.push(
+                        sample
+                            .genotype_quality()
+                            .map(|value| SampleValue::Integer(i32::from(value))),
+                    );
+                }
                 Ok(values)
             })
             .collect::<Result<Vec<_>>>()?;

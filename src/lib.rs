@@ -3,6 +3,7 @@
 mod alignment;
 mod called;
 mod caller;
+mod consensus;
 mod errmod;
 mod error;
 mod format;
@@ -15,6 +16,7 @@ mod stream;
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use called::{CallPloidy, CalledSample, CalledSite};
 pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};
+pub use consensus::{ConsensusCaller, ConsensusCallerConfig};
 pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use format::{CalledVcfSchema, LikelihoodVcfSchema};

@@ -68,6 +68,12 @@ pub enum CallError {
     #[error("multiallelic mutation rate must be finite and between zero and one")]
     InvalidMutationRate,
 
+    #[error("consensus reference probability threshold must be finite and between zero and one")]
+    InvalidConsensusThreshold,
+
+    #[error("the consensus caller requires observed compatible likelihoods")]
+    UnsupportedConsensusLikelihoods,
+
     #[error("the multiallelic caller requires diploid input likelihoods")]
     UnsupportedLikelihoodPloidy,
 
