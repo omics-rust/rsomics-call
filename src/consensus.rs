@@ -357,11 +357,7 @@ fn call_sample(
 }
 
 fn trim_evidence(evidence: &SampleEvidence, allele_count: usize) -> Result<SampleEvidence> {
-    SampleEvidence::new(
-        evidence.depth(),
-        evidence.allele_depths()[..allele_count].to_vec(),
-        evidence.allele_quality_sums()[..allele_count].to_vec(),
-    )
+    evidence.select(&(0..allele_count).collect::<Vec<_>>())
 }
 
 fn trim_likelihoods(

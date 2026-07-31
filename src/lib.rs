@@ -1,6 +1,7 @@
 //! Typed likelihood evidence and calling stages for `rsomics-call`.
 
 mod alignment;
+mod annotation;
 mod called;
 mod caller;
 mod consensus;
@@ -25,7 +26,10 @@ pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use format::{CalledVcfSchema, LikelihoodVcfSchema};
 pub use indel::{IndelLikelihoodConfig, IndelSiteBuilder};
-pub use model::{Allele, IndelSummary, LikelihoodSite, Ploidy, SampleEvidence, SampleLikelihood};
+pub use model::{
+    Allele, IndelSummary, LikelihoodSite, Ploidy, SampleAnnotations, SampleEvidence,
+    SampleLikelihood, SiteAnnotations,
+};
 pub use run::{SnpLikelihoodRun, run_likelihood_calls};
 pub use samples::{SampleMap, SampleMapBuilder, SampleSelection};
 pub use snp::{SnpEvidence, SnpLikelihoodConfig, SnpSiteBuilder};

@@ -49,11 +49,89 @@ impl Ploidy {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SampleAnnotations {
+    forward_allele_depths: Box<[u32]>,
+    reverse_allele_depths: Box<[u32]>,
+    allele_quality_means: Box<[u32]>,
+    strand_bias: u32,
+    soft_clipped_reads: u32,
+}
+
+impl SampleAnnotations {
+    pub fn new(
+        forward_allele_depths: impl Into<Box<[u32]>>,
+        reverse_allele_depths: impl Into<Box<[u32]>>,
+        allele_quality_means: impl Into<Box<[u32]>>,
+        strand_bias: u32,
+        soft_clipped_reads: u32,
+    ) -> Result<Self> {
+        let forward_allele_depths = forward_allele_depths.into();
+        let reverse_allele_depths = reverse_allele_depths.into();
+        let allele_quality_means = allele_quality_means.into();
+        if forward_allele_depths.is_empty()
+            || reverse_allele_depths.len() != forward_allele_depths.len()
+            || allele_quality_means.len() != forward_allele_depths.len()
+        {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
+        Ok(Self {
+            forward_allele_depths,
+            reverse_allele_depths,
+            allele_quality_means,
+            strand_bias,
+            soft_clipped_reads,
+        })
+    }
+
+    pub fn forward_allele_depths(&self) -> &[u32] {
+        &self.forward_allele_depths
+    }
+
+    pub fn reverse_allele_depths(&self) -> &[u32] {
+        &self.reverse_allele_depths
+    }
+
+    pub fn allele_quality_means(&self) -> &[u32] {
+        &self.allele_quality_means
+    }
+
+    pub fn strand_bias(&self) -> u32 {
+        self.strand_bias
+    }
+
+    pub fn soft_clipped_reads(&self) -> u32 {
+        self.soft_clipped_reads
+    }
+
+    fn select(&self, indices: &[usize]) -> Result<Self> {
+        let select = |values: &[u32]| {
+            indices
+                .iter()
+                .map(|&index| {
+                    values
+                        .get(index)
+                        .copied()
+                        .ok_or(CallError::InvalidLikelihoodDimensions)
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        Self::new(
+            select(&self.forward_allele_depths)?,
+            select(&self.reverse_allele_depths)?,
+            select(&self.allele_quality_means)?,
+            self.strand_bias,
+            self.soft_clipped_reads,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SampleEvidence {
     depth: u32,
     allele_depths: Box<[u32]>,
     allele_quality_sums: Box<[u32]>,
+    annotations: Option<SampleAnnotations>,
 }
 
 impl SampleEvidence {
@@ -71,7 +149,25 @@ impl SampleEvidence {
             depth,
             allele_depths,
             allele_quality_sums,
+            annotations: None,
         })
+    }
+
+    pub fn with_annotations(mut self, annotations: SampleAnnotations) -> Result<Self> {
+        if annotations.forward_allele_depths.len() != self.allele_depths.len() {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
+        if self
+            .allele_depths
+            .iter()
+            .zip(&annotations.forward_allele_depths)
+            .zip(&annotations.reverse_allele_depths)
+            .any(|((&depth, &forward), &reverse)| forward.checked_add(reverse) != Some(depth))
+        {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
+        self.annotations = Some(annotations);
+        Ok(self)
     }
 
     pub fn empty(allele_count: usize) -> Result<Self> {
@@ -89,9 +185,36 @@ impl SampleEvidence {
     pub fn depth(&self) -> u32 {
         self.depth
     }
+
+    pub fn annotations(&self) -> Option<&SampleAnnotations> {
+        self.annotations.as_ref()
+    }
+
+    pub(crate) fn select(&self, indices: &[usize]) -> Result<Self> {
+        let select = |values: &[u32]| {
+            indices
+                .iter()
+                .map(|&index| {
+                    values
+                        .get(index)
+                        .copied()
+                        .ok_or(CallError::InvalidLikelihoodDimensions)
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        let mut evidence = Self::new(
+            self.depth,
+            select(&self.allele_depths)?,
+            select(&self.allele_quality_sums)?,
+        )?;
+        if let Some(annotations) = &self.annotations {
+            evidence = evidence.with_annotations(annotations.select(indices)?)?;
+        }
+        Ok(evidence)
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SampleLikelihood {
     ploidy: Ploidy,
     phred_likelihoods: Option<Box<[u32]>>,
@@ -169,6 +292,147 @@ impl IndelSummary {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct SiteAnnotations {
+    raw_depth: u32,
+    auxiliary: [f32; 16],
+    variant_distance_bias: Option<f32>,
+    read_position_bias: Option<f32>,
+    mapping_quality_bias: Option<f32>,
+    base_quality_bias: Option<f32>,
+    mapping_quality_strand_bias: Option<f32>,
+    mismatch_bias: Option<f32>,
+    soft_clip_bias: Option<f32>,
+    strand_bias: Option<f32>,
+    segregation_bias: Option<f32>,
+    zero_mapping_quality_fraction: f32,
+    average_mismatches: Option<[f32; 2]>,
+}
+
+pub(crate) struct SiteAnnotationValues {
+    pub(crate) raw_depth: u32,
+    pub(crate) auxiliary: [f32; 16],
+    pub(crate) variant_distance_bias: Option<f32>,
+    pub(crate) read_position_bias: Option<f32>,
+    pub(crate) mapping_quality_bias: Option<f32>,
+    pub(crate) base_quality_bias: Option<f32>,
+    pub(crate) mapping_quality_strand_bias: Option<f32>,
+    pub(crate) mismatch_bias: Option<f32>,
+    pub(crate) soft_clip_bias: Option<f32>,
+    pub(crate) strand_bias: Option<f32>,
+    pub(crate) segregation_bias: Option<f32>,
+    pub(crate) zero_mapping_quality_fraction: f32,
+    pub(crate) average_mismatches: Option<[f32; 2]>,
+}
+
+impl SiteAnnotations {
+    pub(crate) fn new(values: SiteAnnotationValues) -> Result<Self> {
+        let SiteAnnotationValues {
+            raw_depth,
+            auxiliary,
+            variant_distance_bias,
+            read_position_bias,
+            mapping_quality_bias,
+            base_quality_bias,
+            mapping_quality_strand_bias,
+            mismatch_bias,
+            soft_clip_bias,
+            strand_bias,
+            segregation_bias,
+            zero_mapping_quality_fraction,
+            average_mismatches,
+        } = values;
+        let finite = auxiliary.iter().all(|value| value.is_finite())
+            && [
+                variant_distance_bias,
+                read_position_bias,
+                mapping_quality_bias,
+                base_quality_bias,
+                mapping_quality_strand_bias,
+                mismatch_bias,
+                soft_clip_bias,
+                strand_bias,
+                segregation_bias,
+            ]
+            .into_iter()
+            .flatten()
+            .all(f32::is_finite)
+            && zero_mapping_quality_fraction.is_finite()
+            && (0.0..=1.0).contains(&zero_mapping_quality_fraction)
+            && average_mismatches.is_none_or(|values| values.into_iter().all(f32::is_finite));
+        if !finite {
+            return Err(CallError::InvalidLikelihoodAnnotations);
+        }
+        Ok(Self {
+            raw_depth,
+            auxiliary,
+            variant_distance_bias,
+            read_position_bias,
+            mapping_quality_bias,
+            base_quality_bias,
+            mapping_quality_strand_bias,
+            mismatch_bias,
+            soft_clip_bias,
+            strand_bias,
+            segregation_bias,
+            zero_mapping_quality_fraction,
+            average_mismatches,
+        })
+    }
+
+    pub fn raw_depth(&self) -> u32 {
+        self.raw_depth
+    }
+
+    pub fn auxiliary(&self) -> &[f32; 16] {
+        &self.auxiliary
+    }
+
+    pub fn variant_distance_bias(&self) -> Option<f32> {
+        self.variant_distance_bias
+    }
+
+    pub fn read_position_bias(&self) -> Option<f32> {
+        self.read_position_bias
+    }
+
+    pub fn mapping_quality_bias(&self) -> Option<f32> {
+        self.mapping_quality_bias
+    }
+
+    pub fn base_quality_bias(&self) -> Option<f32> {
+        self.base_quality_bias
+    }
+
+    pub fn mapping_quality_strand_bias(&self) -> Option<f32> {
+        self.mapping_quality_strand_bias
+    }
+
+    pub fn mismatch_bias(&self) -> Option<f32> {
+        self.mismatch_bias
+    }
+
+    pub fn soft_clip_bias(&self) -> Option<f32> {
+        self.soft_clip_bias
+    }
+
+    pub fn strand_bias(&self) -> Option<f32> {
+        self.strand_bias
+    }
+
+    pub fn segregation_bias(&self) -> Option<f32> {
+        self.segregation_bias
+    }
+
+    pub fn zero_mapping_quality_fraction(&self) -> f32 {
+        self.zero_mapping_quality_fraction
+    }
+
+    pub fn average_mismatches(&self) -> Option<[f32; 2]> {
+        self.average_mismatches
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct LikelihoodSite {
     reference_sequence_id: usize,
     position: u64,
@@ -177,6 +441,7 @@ pub struct LikelihoodSite {
     allele_quality_sums: Box<[f32]>,
     samples: Box<[SampleLikelihood]>,
     indel_summary: Option<IndelSummary>,
+    annotations: Option<SiteAnnotations>,
 }
 
 impl LikelihoodSite {
@@ -225,11 +490,17 @@ impl LikelihoodSite {
             allele_quality_sums,
             samples,
             indel_summary: None,
+            annotations: None,
         })
     }
 
     pub fn with_indel_summary(mut self, summary: IndelSummary) -> Self {
         self.indel_summary = Some(summary);
+        self
+    }
+
+    pub fn with_annotations(mut self, annotations: SiteAnnotations) -> Self {
+        self.annotations = Some(annotations);
         self
     }
 
@@ -259,6 +530,10 @@ impl LikelihoodSite {
 
     pub fn indel_summary(&self) -> Option<IndelSummary> {
         self.indel_summary
+    }
+
+    pub fn annotations(&self) -> Option<&SiteAnnotations> {
+        self.annotations.as_ref()
     }
 }
 

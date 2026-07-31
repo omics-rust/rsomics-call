@@ -3,12 +3,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use noodles::sam::alignment::io::Write as _;
+use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
-    AlignmentInput, IndelLikelihoodConfig, LikelihoodSite, LikelihoodVcfSchema, SampleSelection,
-    SnpLikelihoodConfig, SnpLikelihoodRun,
+    AlignmentInput, IndelLikelihoodConfig, LikelihoodSite, LikelihoodVariantReader,
+    LikelihoodVcfSchema, SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
+
+const ANNOTATIONS: &str = "FORMAT/DP,FORMAT/ADF,FORMAT/ADR,FORMAT/QM,FORMAT/QS,FORMAT/SP,FORMAT/SCR,INFO/AD,INFO/ADF,INFO/ADR,INFO/FS,INFO/NMBZ,INFO/NM,INFO/SCR";
 
 fn bcftools() -> String {
     std::env::var("BCFTOOLS").unwrap_or_else(|_| "bcftools".to_owned())
@@ -97,24 +100,59 @@ fn write_indexed_alignment(
 }
 
 fn decode_likelihoods(output: &[u8]) -> Vec<LikelihoodSite> {
-    let mut reader = vcf::io::Reader::new(output);
-    let header = reader.read_header().unwrap();
-    let schema = LikelihoodVcfSchema::from_header(header.clone()).unwrap();
-    let mut record = vcf::variant::RecordBuf::default();
+    let mut reader = LikelihoodVariantReader::new(output).unwrap();
     let mut sites = Vec::new();
-    while reader.read_record_buf(&header, &mut record).unwrap() != 0 {
-        sites.push(schema.decode_likelihood(&record).unwrap());
+    while let Some(site) = reader.read_site().unwrap() {
+        sites.push(site);
     }
     sites
 }
 
+fn assert_sites_match(actual: &[LikelihoodSite], expected: &[LikelihoodSite]) {
+    assert_eq!(actual.len(), expected.len());
+    if actual.is_empty() {
+        return;
+    }
+    let reference_count = actual
+        .iter()
+        .chain(expected)
+        .map(LikelihoodSite::reference_sequence_id)
+        .max()
+        .unwrap()
+        + 1;
+    let references = (0..reference_count)
+        .map(|index| (format!("ref{index}").into_bytes(), 1_000_000))
+        .collect::<Vec<_>>();
+    let samples = (0..actual[0].samples().len())
+        .map(|index| format!("sample{index}"))
+        .collect::<Vec<_>>();
+    let schema = LikelihoodVcfSchema::new(references, &samples).unwrap();
+    for (actual, expected) in actual.iter().zip(expected) {
+        let encode = |site: &LikelihoodSite| {
+            let record = schema.encode_likelihood(site).unwrap();
+            let mut data = Vec::new();
+            let mut writer = vcf::io::Writer::new(&mut data);
+            writer
+                .write_variant_record(schema.header(), &record)
+                .unwrap();
+            String::from_utf8(data).unwrap()
+        };
+        assert_eq!(
+            encode(actual),
+            encode(expected),
+            "site {}:{}",
+            actual.reference_sequence_id(),
+            actual.position()
+        );
+    }
+}
+
 fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
     let mut command = Command::new(bcftools());
-    command.args(["mpileup", "-f"]).arg(reference).args([
-        "-a",
-        "FORMAT/DP,FORMAT/AD,FORMAT/QS",
-        "-Ov",
-    ]);
+    command
+        .args(["mpileup", "-f"])
+        .arg(reference)
+        .args(["-a", ANNOTATIONS, "-Ou"]);
     command.args(alignments);
     let output = command.output().unwrap();
     assert!(
@@ -122,13 +160,9 @@ fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut reader = vcf::io::Reader::new(&output.stdout[..]);
-    let header = reader.read_header().unwrap();
-    let schema = LikelihoodVcfSchema::from_header(header.clone()).unwrap();
-    let mut record = vcf::variant::RecordBuf::default();
+    let mut reader = LikelihoodVariantReader::new(&output.stdout[..]).unwrap();
     loop {
-        assert_ne!(reader.read_record_buf(&header, &mut record).unwrap(), 0);
-        let site = schema.decode_likelihood(&record).unwrap();
+        let site = reader.read_site().unwrap().unwrap();
         if site.indel_summary().is_some() {
             return site;
         }
@@ -160,6 +194,64 @@ fn rsomics_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
     })
     .unwrap();
     indel.unwrap()
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn complete_snp_annotations_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = write_reference(directory.path(), "AAAAAAAAA");
+    let alignment = directory.path().join("annotations.sam");
+    let mut records =
+        "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:MX\tLN:9\n@RG\tID:rg\tSM:sample\n".to_owned();
+    records
+        .push_str("rf1\t0\tMX\t1\t60\t2S9M\t*\t0\t0\tTTAAAAAAAAA\tIIIIIIIIIII\tRG:Z:rg\tNM:i:0\n");
+    for index in 2..=4 {
+        records.push_str(&format!(
+            "rf{index}\t0\tMX\t1\t60\t9M\t*\t0\t0\tAAAAAAAAA\tIIIIIIIII\tRG:Z:rg\tNM:i:0\n"
+        ));
+    }
+    records.push_str("rr\t16\tMX\t1\t20\t9M\t*\t0\t0\tAAAAAAAAA\tIIIIIIIII\tRG:Z:rg\tNM:i:3\n");
+    records.push_str("af\t0\tMX\t1\t50\t9M\t*\t0\t0\tAAAACAAAA\t555555555\tRG:Z:rg\tNM:i:1\n");
+    records
+        .push_str("ar1\t16\tMX\t1\t30\t9M2S\t*\t0\t0\tAAAACAAAATT\t55555555555\tRG:Z:rg\tNM:i:4\n");
+    for index in 2..=4 {
+        records.push_str(&format!(
+            "ar{index}\t16\tMX\t1\t30\t9M\t*\t0\t0\tAAAACAAAA\t555555555\tRG:Z:rg\tNM:i:4\n"
+        ));
+    }
+    fs::write(&alignment, records).unwrap();
+
+    let output = Command::new(bcftools())
+        .args(["mpileup", "-B", "-f"])
+        .arg(&reference)
+        .args(["-a", ANNOTATIONS, "-Ou"])
+        .arg(&alignment)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = decode_likelihoods(&output.stdout);
+
+    let run = SnpLikelihoodRun::open(
+        [AlignmentInput::new(0, &alignment, "annotations")],
+        &reference,
+        SampleSelection::default(),
+        PileupOptions::default(),
+        SnpLikelihoodConfig::default(),
+    )
+    .unwrap();
+    let mut actual = Vec::new();
+    run.run(|site| {
+        actual.push(site);
+        Ok(())
+    })
+    .unwrap();
+    assert_sites_match(&actual, &expected);
 }
 
 #[test]
@@ -199,9 +291,9 @@ fn indel_likelihoods_match_bcftools_1_24() {
         vec![deletion],
         vec![insertion, reference_reads, trailing],
     ] {
-        assert_eq!(
-            rsomics_indel(&reference, &alignments),
-            bcftools_indel(&reference, &alignments)
+        assert_sites_match(
+            &[rsomics_indel(&reference, &alignments)],
+            &[bcftools_indel(&reference, &alignments)],
         );
     }
 
@@ -216,9 +308,12 @@ fn indel_likelihoods_match_bcftools_1_24() {
         "7M1I6M",
         "CGTCAAAAAAACTG",
     );
-    assert_eq!(
-        rsomics_indel(&repeat_reference, std::slice::from_ref(&repeat_insertion)),
-        bcftools_indel(&repeat_reference, &[repeat_insertion])
+    assert_sites_match(
+        &[rsomics_indel(
+            &repeat_reference,
+            std::slice::from_ref(&repeat_insertion),
+        )],
+        &[bcftools_indel(&repeat_reference, &[repeat_insertion])],
     );
 }
 
@@ -248,15 +343,7 @@ fn indexed_regions_and_streaming_targets_match_bcftools_1_24() {
     let output = Command::new(bcftools())
         .args(["mpileup", "-B", "-f"])
         .arg(&reference)
-        .args([
-            "-a",
-            "FORMAT/DP,FORMAT/AD,FORMAT/QS",
-            "-r",
-            regions,
-            "-t",
-            targets,
-            "-Ov",
-        ])
+        .args(["-a", ANNOTATIONS, "-r", regions, "-t", targets, "-Ou"])
         .args([&first, &second])
         .output()
         .unwrap();
@@ -286,7 +373,7 @@ fn indexed_regions_and_streaming_targets_match_bcftools_1_24() {
     })
     .unwrap();
 
-    assert_eq!(actual, expected);
+    assert_sites_match(&actual, &expected);
 }
 
 #[test]
@@ -316,9 +403,9 @@ fn unindexed_streaming_targets_match_bcftools_1_24() {
         let output = Command::new(bcftools())
             .args(["mpileup", "-B", "-f"])
             .arg(&reference)
-            .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-T"])
+            .args(["-a", ANNOTATIONS, "-T"])
             .arg(&targets)
-            .arg("-Ov")
+            .arg("-Ou")
             .arg(&input)
             .output()
             .unwrap();
@@ -345,6 +432,6 @@ fn unindexed_streaming_targets_match_bcftools_1_24() {
         })
         .unwrap();
 
-        assert_eq!(actual, expected, "{}", targets.display());
+        assert_sites_match(&actual, &expected);
     }
 }

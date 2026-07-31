@@ -1071,7 +1071,7 @@ mod tests {
                 .iter()
                 .map(|site| site.samples()[0].evidence().depth())
                 .collect::<Vec<_>>(),
-            [1, 1, 2, 2, 2, 1, 1]
+            [1, 1, 0, 0, 0, 0, 1]
         );
     }
 

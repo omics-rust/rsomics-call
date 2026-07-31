@@ -87,6 +87,9 @@ pub enum CallError {
     #[error("invalid indel site summary")]
     InvalidIndelSummary,
 
+    #[error("invalid likelihood annotations")]
+    InvalidLikelihoodAnnotations,
+
     #[error("indel evidence exceeds the supported count range")]
     IndelEvidenceOverflow,
 

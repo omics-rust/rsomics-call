@@ -4,6 +4,7 @@ use rsomics_pileup::Column;
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, LikelihoodMatrix, LikelihoodSite, Nucleotide,
     Ploidy, Result, SampleEvidence, SampleLikelihood,
+    annotation::{AnnotationEvidence, AnnotationObservation, site_annotations},
 };
 
 const NUCLEOTIDE: [Nucleotide; 16] = [
@@ -77,6 +78,7 @@ pub struct SnpEvidence {
     depth: u32,
     allele_depths: [u32; 5],
     quality_sums: [u32; 5],
+    annotations: AnnotationEvidence,
 }
 
 impl SnpEvidence {
@@ -89,7 +91,17 @@ impl SnpEvidence {
     ) -> Result<Self> {
         let mut accumulator = SnpAccumulator::with_observations(std::mem::take(observations));
         for entry in column.entries() {
-            accumulator.push(entry.record(), entry.projection(), reference_base, config);
+            let cigar = entry
+                .cigar()
+                .map(|(kind, length)| (kind, length as usize))
+                .collect::<Vec<_>>();
+            accumulator.push(
+                entry.record(),
+                entry.projection(),
+                &cigar,
+                reference_base,
+                config,
+            );
         }
         let evidence = accumulator.finish(model)?;
         *observations = accumulator.observations;
@@ -119,6 +131,7 @@ struct SnpAccumulator {
     depth: u64,
     allele_depths: [u64; 5],
     quality_sums: [u64; 5],
+    annotations: AnnotationEvidence,
 }
 
 impl SnpAccumulator {
@@ -135,19 +148,22 @@ impl SnpAccumulator {
         self.depth = 0;
         self.allele_depths.fill(0);
         self.quality_sums.fill(0);
+        self.annotations.clear();
     }
 
     fn push(
         &mut self,
         record: &RawRecord,
         projection: &rsomics_pileup::PileupRead,
+        cigar: &[(u8, usize)],
         reference_base: Nucleotide,
         config: SnpLikelihoodConfig,
     ) {
+        self.annotations.begin_read(cigar);
         if projection.is_deletion || projection.is_reference_skip {
             return;
         }
-        self.depth += 1;
+        self.annotations.add_raw_depth();
 
         let qualities = record.quality_scores();
         let qpos = projection.qpos;
@@ -170,13 +186,14 @@ impl SnpAccumulator {
         if base_quality < u16::from(config.minimum_base_quality) {
             return;
         }
+        self.depth += 1;
         let base_quality =
             u8::try_from(base_quality.min(u16::from(config.maximum_base_quality))).unwrap();
-        let mapping_quality = match record.mapping_quality() {
+        let raw_mapping_quality = match record.mapping_quality() {
             255 => 20,
             quality => quality,
-        }
-        .min(config.mapping_quality_cap);
+        };
+        let mapping_quality = raw_mapping_quality.min(config.mapping_quality_cap);
         let effective_quality = base_quality.min(mapping_quality).clamp(4, 63);
         let nibble = record.seq_nibble(qpos);
         let base = if nibble == 0 {
@@ -184,8 +201,23 @@ impl SnpAccumulator {
         } else {
             NUCLEOTIDE[usize::from(nibble)]
         };
-        self.allele_depths[base as usize] += 1;
-        self.quality_sums[base as usize] += u64::from(effective_quality);
+        if base != Nucleotide::N {
+            self.allele_depths[base as usize] += 1;
+            self.quality_sums[base as usize] += u64::from(effective_quality);
+        }
+        self.annotations.observe(
+            record,
+            projection,
+            cigar,
+            AnnotationObservation {
+                allele: base as usize,
+                is_reference: base == reference_base,
+                base_quality,
+                raw_mapping_quality,
+                mapping_quality,
+                effective_quality,
+            },
+        );
         self.observations.push(BaseObservation::new(
             base,
             effective_quality,
@@ -199,6 +231,7 @@ impl SnpAccumulator {
             depth: u32::try_from(self.depth).map_err(|_| CallError::SnpEvidenceOverflow)?,
             allele_depths: checked_counts(self.allele_depths)?,
             quality_sums: checked_counts(self.quality_sums)?,
+            annotations: self.annotations.clone(),
         })
     }
 }
@@ -241,9 +274,14 @@ impl SnpSiteBuilder {
                 .samples
                 .get_mut(index)
                 .ok_or(CallError::InvalidSampleIndex { index, count })?;
+            let cigar = entry
+                .cigar()
+                .map(|(kind, length)| (kind, length as usize))
+                .collect::<Vec<_>>();
             sample.push(
                 entry.record(),
                 entry.projection(),
+                &cigar,
                 reference_base,
                 self.config,
             );
@@ -257,6 +295,14 @@ impl SnpSiteBuilder {
             .collect::<Result<Vec<_>>>()?;
         let alleles = selected_alleles(reference_base, &evidence)?;
         let allele_count = alleles.len();
+        let has_alternate = alleles
+            .iter()
+            .skip(1)
+            .any(|allele| allele.allele.as_bytes() != b"<*>");
+        let selected_indices = alleles
+            .iter()
+            .map(|allele| allele.matrix_base as usize)
+            .collect::<Vec<_>>();
         let diploid = Ploidy::new(2).unwrap();
         let samples = evidence
             .iter()
@@ -284,7 +330,10 @@ impl SnpSiteBuilder {
                     .map(|allele| sample.quality_sums()[allele.matrix_base as usize])
                     .collect::<Vec<_>>();
                 let evidence =
-                    SampleEvidence::new(sample.depth(), allele_depths, allele_quality_sums)?;
+                    SampleEvidence::new(sample.depth(), allele_depths, allele_quality_sums)?
+                        .with_annotations(
+                            sample.annotations.sample_annotations(&selected_indices)?,
+                        )?;
                 SampleLikelihood::observed(diploid, phred_likelihoods, evidence)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -302,14 +351,20 @@ impl SnpSiteBuilder {
             alternates.push(allele.allele);
             allele_quality_sums.push(allele.quality_sum);
         }
-        LikelihoodSite::new(
+        let annotations = site_annotations(
+            evidence.iter().map(|sample| &sample.annotations),
+            false,
+            has_alternate,
+        )?;
+        Ok(LikelihoodSite::new(
             reference_sequence_id,
             position,
             reference,
             alternates,
             allele_quality_sums,
             samples,
-        )
+        )?
+        .with_annotations(annotations))
     }
 }
 

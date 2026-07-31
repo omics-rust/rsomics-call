@@ -26,14 +26,31 @@ use noodles::{
 };
 
 use crate::{
-    Allele, CallError, CalledSite, IndelSummary, LikelihoodSite, Ploidy, Result, SampleEvidence,
-    SampleLikelihood,
+    Allele, CallError, CalledSite, IndelSummary, LikelihoodSite, Ploidy, Result, SampleAnnotations,
+    SampleEvidence, SampleLikelihood, SiteAnnotations, model::SiteAnnotationValues,
 };
 
 const QUALITY_SUM: &str = "QS";
 const INDEL: &str = "INDEL";
 const IDV: &str = "IDV";
 const IMF: &str = "IMF";
+const VDB: &str = "VDB";
+const RPBZ: &str = "RPBZ";
+const MQBZ: &str = "MQBZ";
+const BQBZ: &str = "BQBZ";
+const MQSBZ: &str = "MQSBZ";
+const NM: &str = "NM";
+const NMBZ: &str = "NMBZ";
+const SCBZ: &str = "SCBZ";
+const FS: &str = "FS";
+const SGB: &str = "SGB";
+const MQ0F: &str = "MQ0F";
+const I16: &str = "I16";
+const ADF: &str = "ADF";
+const ADR: &str = "ADR";
+const SCR: &str = "SCR";
+const SP: &str = "SP";
+const QM: &str = "QM";
 const PL: &str = "PL";
 const DP: &str = "DP";
 const AD: &str = "AD";
@@ -96,6 +113,138 @@ impl LikelihoodVcfSchema {
                     "Maximum fraction of raw reads supporting an indel",
                 ),
             )
+            .add_info(
+                DP,
+                Map::<Info>::new(InfoNumber::Count(1), InfoType::Integer, "Raw read depth"),
+            )
+            .add_info(
+                VDB,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Variant Distance Bias for filtering splice-site artefacts in RNA-seq data (bigger is better)",
+                ),
+            )
+            .add_info(
+                RPBZ,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Mann-Whitney U-z test of Read Position Bias (closer to 0 is better)",
+                ),
+            )
+            .add_info(
+                MQBZ,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Mann-Whitney U-z test of Mapping Quality Bias (closer to 0 is better)",
+                ),
+            )
+            .add_info(
+                BQBZ,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Mann-Whitney U-z test of Base Quality Bias (closer to 0 is better)",
+                ),
+            )
+            .add_info(
+                MQSBZ,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Mann-Whitney U-z test of Mapping Quality vs Strand Bias (closer to 0 is better)",
+                ),
+            )
+            .add_info(
+                NM,
+                Map::<Info>::new(
+                    InfoNumber::Count(2),
+                    InfoType::Float,
+                    "Average number of mismatches in ref and alt reads",
+                ),
+            )
+            .add_info(
+                NMBZ,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Mann-Whitney U-z test of Number of Mismatches within supporting reads (closer to 0 is better)",
+                ),
+            )
+            .add_info(
+                SCBZ,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Mann-Whitney U-z test of Soft-Clip Length Bias (closer to 0 is better)",
+                ),
+            )
+            .add_info(
+                FS,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Fisher's exact test P-value to detect strand bias",
+                ),
+            )
+            .add_info(
+                SGB,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Segregation based metric",
+                ),
+            )
+            .add_info(
+                MQ0F,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Fraction of MQ0 reads (smaller is better)",
+                ),
+            )
+            .add_info(
+                I16,
+                Map::<Info>::new(
+                    InfoNumber::Count(16),
+                    InfoType::Float,
+                    "Auxiliary tag used for calling",
+                ),
+            )
+            .add_info(
+                AD,
+                Map::<Info>::new(
+                    InfoNumber::ReferenceAlternateBases,
+                    InfoType::Integer,
+                    "Total allelic depths (high-quality bases)",
+                ),
+            )
+            .add_info(
+                ADF,
+                Map::<Info>::new(
+                    InfoNumber::ReferenceAlternateBases,
+                    InfoType::Integer,
+                    "Total allelic depths on the forward strand (high-quality bases)",
+                ),
+            )
+            .add_info(
+                ADR,
+                Map::<Info>::new(
+                    InfoNumber::ReferenceAlternateBases,
+                    InfoType::Integer,
+                    "Total allelic depths on the reverse strand (high-quality bases)",
+                ),
+            )
+            .add_info(
+                SCR,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Integer,
+                    "Number of soft-clipped reads",
+                ),
+            )
             .add_format(
                 PL,
                 Map::<Format>::new(
@@ -113,6 +262,14 @@ impl LikelihoodVcfSchema {
                 ),
             )
             .add_format(
+                SP,
+                Map::<Format>::new(
+                    FormatNumber::Count(1),
+                    FormatType::Integer,
+                    "Phred-scaled strand bias P-value",
+                ),
+            )
+            .add_format(
                 AD,
                 Map::<Format>::new(
                     FormatNumber::ReferenceAlternateBases,
@@ -121,11 +278,43 @@ impl LikelihoodVcfSchema {
                 ),
             )
             .add_format(
+                ADF,
+                Map::<Format>::new(
+                    FormatNumber::ReferenceAlternateBases,
+                    FormatType::Integer,
+                    "Allelic depths on the forward strand (high-quality bases)",
+                ),
+            )
+            .add_format(
+                ADR,
+                Map::<Format>::new(
+                    FormatNumber::ReferenceAlternateBases,
+                    FormatType::Integer,
+                    "Allelic depths on the reverse strand (high-quality bases)",
+                ),
+            )
+            .add_format(
+                SCR,
+                Map::<Format>::new(
+                    FormatNumber::Count(1),
+                    FormatType::Integer,
+                    "Per-sample number of soft-clipped reads",
+                ),
+            )
+            .add_format(
                 QUALITY_SUM,
                 Map::<Format>::new(
                     FormatNumber::ReferenceAlternateBases,
                     FormatType::Integer,
                     "Phred-score allele quality sum used by calling",
+                ),
+            )
+            .add_format(
+                QM,
+                Map::<Format>::new(
+                    FormatNumber::ReferenceAlternateBases,
+                    FormatType::Integer,
+                    "Phred-score allele quality mean",
                 ),
             );
 
@@ -173,6 +362,27 @@ impl LikelihoodVcfSchema {
         require_optional_info(&header, INDEL, InfoNumber::Count(0), InfoType::Flag)?;
         require_optional_info(&header, IDV, InfoNumber::Count(1), InfoType::Integer)?;
         require_optional_info(&header, IMF, InfoNumber::Count(1), InfoType::Float)?;
+        for (key, number, ty) in [
+            (DP, InfoNumber::Count(1), InfoType::Integer),
+            (VDB, InfoNumber::Count(1), InfoType::Float),
+            (RPBZ, InfoNumber::Count(1), InfoType::Float),
+            (MQBZ, InfoNumber::Count(1), InfoType::Float),
+            (BQBZ, InfoNumber::Count(1), InfoType::Float),
+            (MQSBZ, InfoNumber::Count(1), InfoType::Float),
+            (NM, InfoNumber::Count(2), InfoType::Float),
+            (NMBZ, InfoNumber::Count(1), InfoType::Float),
+            (SCBZ, InfoNumber::Count(1), InfoType::Float),
+            (FS, InfoNumber::Count(1), InfoType::Float),
+            (SGB, InfoNumber::Count(1), InfoType::Float),
+            (MQ0F, InfoNumber::Count(1), InfoType::Float),
+            (I16, InfoNumber::Count(16), InfoType::Float),
+            (AD, InfoNumber::ReferenceAlternateBases, InfoType::Integer),
+            (ADF, InfoNumber::ReferenceAlternateBases, InfoType::Integer),
+            (ADR, InfoNumber::ReferenceAlternateBases, InfoType::Integer),
+            (SCR, InfoNumber::Count(1), InfoType::Integer),
+        ] {
+            require_optional_info(&header, key, number, ty)?;
+        }
         require_format(
             &header,
             PL,
@@ -187,6 +397,15 @@ impl LikelihoodVcfSchema {
             FormatType::Integer,
             false,
         )?;
+        for (key, number) in [
+            (SP, FormatNumber::Count(1)),
+            (ADF, FormatNumber::ReferenceAlternateBases),
+            (ADR, FormatNumber::ReferenceAlternateBases),
+            (SCR, FormatNumber::Count(1)),
+            (QM, FormatNumber::ReferenceAlternateBases),
+        ] {
+            require_format(&header, key, number, FormatType::Integer, false)?;
+        }
         require_format(
             &header,
             AD,
@@ -240,26 +459,71 @@ impl LikelihoodVcfSchema {
             ))),
         )]);
         insert_indel_info(&self.header, &mut info, site.indel_summary())?;
-        let keys = Keys::from_iter([
+        if let Some(annotations) = site.annotations() {
+            insert_site_annotations(&self.header, &mut info, annotations)?;
+        }
+        let complete_sample_annotations = site
+            .samples()
+            .iter()
+            .all(|sample| sample.evidence().annotations().is_some());
+        if complete_sample_annotations {
+            insert_total_depth_annotations(&self.header, &mut info, site.samples())?;
+        }
+        let mut keys = vec![
             PL.to_owned(),
             DP.to_owned(),
             AD.to_owned(),
             QUALITY_SUM.to_owned(),
-        ]);
+        ];
+        if complete_sample_annotations {
+            keys = vec![
+                PL.to_owned(),
+                DP.to_owned(),
+                SP.to_owned(),
+                ADF.to_owned(),
+                ADR.to_owned(),
+                AD.to_owned(),
+                SCR.to_owned(),
+                QUALITY_SUM.to_owned(),
+                QM.to_owned(),
+            ];
+        }
+        let keys = Keys::from_iter(keys);
         let values = site
             .samples()
             .iter()
             .map(|sample| {
                 let evidence = sample.evidence();
-                Ok(vec![
+                let mut values = vec![
                     sample
                         .phred_likelihoods()
                         .map(|values| checked_array(values, PL))
                         .transpose()?,
                     Some(SampleValue::Integer(checked_integer(evidence.depth(), DP)?)),
-                    Some(checked_array(evidence.allele_depths(), AD)?),
-                    Some(checked_array(evidence.allele_quality_sums(), QUALITY_SUM)?),
-                ])
+                ];
+                if let Some(annotations) = evidence.annotations() {
+                    values.extend([
+                        Some(SampleValue::Integer(checked_integer(
+                            annotations.strand_bias(),
+                            SP,
+                        )?)),
+                        Some(checked_array(annotations.forward_allele_depths(), ADF)?),
+                        Some(checked_array(annotations.reverse_allele_depths(), ADR)?),
+                        Some(checked_array(evidence.allele_depths(), AD)?),
+                        Some(SampleValue::Integer(checked_integer(
+                            annotations.soft_clipped_reads(),
+                            SCR,
+                        )?)),
+                        Some(checked_array(evidence.allele_quality_sums(), QUALITY_SUM)?),
+                        Some(checked_array(annotations.allele_quality_means(), QM)?),
+                    ]);
+                } else {
+                    values.extend([
+                        Some(checked_array(evidence.allele_depths(), AD)?),
+                        Some(checked_array(evidence.allele_quality_sums(), QUALITY_SUM)?),
+                    ]);
+                }
+                Ok(values)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -307,7 +571,7 @@ impl LikelihoodVcfSchema {
         let samples = (0..self.header.sample_names().len())
             .map(|index| decode_sample(record.samples(), index, allele_count))
             .collect::<Result<Vec<_>>>()?;
-        let site = LikelihoodSite::new(
+        let mut site = LikelihoodSite::new(
             reference_sequence_id,
             position,
             reference,
@@ -315,10 +579,13 @@ impl LikelihoodVcfSchema {
             allele_quality_sums,
             samples,
         )?;
-        match decode_indel_summary(record)? {
-            Some(summary) => Ok(site.with_indel_summary(summary)),
-            None => Ok(site),
+        if let Some(summary) = decode_indel_summary(record)? {
+            site = site.with_indel_summary(summary);
         }
+        if let Some(annotations) = decode_site_annotations(record)? {
+            site = site.with_annotations(annotations);
+        }
+        Ok(site)
     }
 }
 
@@ -562,6 +829,153 @@ fn insert_indel_info(
     Ok(())
 }
 
+fn insert_site_annotations(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    annotations: &SiteAnnotations,
+) -> Result<()> {
+    insert_info_integer(header, info, DP, annotations.raw_depth())?;
+    insert_info_float_array(header, info, I16, annotations.auxiliary())?;
+    insert_optional_info_float(header, info, VDB, annotations.variant_distance_bias())?;
+    insert_optional_info_float(header, info, SGB, annotations.segregation_bias())?;
+    if let Some(values) = annotations.average_mismatches() {
+        insert_info_float_array(header, info, NM, &values)?;
+    }
+    insert_optional_info_float(header, info, RPBZ, annotations.read_position_bias())?;
+    insert_optional_info_float(header, info, MQBZ, annotations.mapping_quality_bias())?;
+    insert_optional_info_float(
+        header,
+        info,
+        MQSBZ,
+        annotations.mapping_quality_strand_bias(),
+    )?;
+    insert_optional_info_float(header, info, BQBZ, annotations.base_quality_bias())?;
+    insert_optional_info_float(header, info, NMBZ, annotations.mismatch_bias())?;
+    insert_optional_info_float(header, info, SCBZ, annotations.soft_clip_bias())?;
+    insert_optional_info_float(header, info, FS, annotations.strand_bias())?;
+    insert_info_float(
+        header,
+        info,
+        MQ0F,
+        annotations.zero_mapping_quality_fraction(),
+    )
+}
+
+fn insert_total_depth_annotations(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    samples: &[SampleLikelihood],
+) -> Result<()> {
+    let allele_count = samples[0].evidence().allele_depths().len();
+    let mut forward = vec![0u64; allele_count];
+    let mut reverse = vec![0u64; allele_count];
+    let mut soft_clipped_reads = 0u64;
+    for sample in samples {
+        let annotations = sample.evidence().annotations().unwrap();
+        for (total, &value) in forward.iter_mut().zip(annotations.forward_allele_depths()) {
+            *total += u64::from(value);
+        }
+        for (total, &value) in reverse.iter_mut().zip(annotations.reverse_allele_depths()) {
+            *total += u64::from(value);
+        }
+        soft_clipped_reads += u64::from(annotations.soft_clipped_reads());
+    }
+    let depths = forward
+        .iter()
+        .zip(&reverse)
+        .map(|(&forward, &reverse)| forward + reverse)
+        .collect::<Vec<_>>();
+    insert_info_integer_array(header, info, ADF, &forward)?;
+    insert_info_integer_array(header, info, ADR, &reverse)?;
+    insert_info_integer_array(header, info, AD, &depths)?;
+    insert_info_integer(
+        header,
+        info,
+        SCR,
+        u32::try_from(soft_clipped_reads)
+            .map_err(|_| invalid("INFO/SCR exceeds the VCF integer range"))?,
+    )
+}
+
+fn insert_info_integer(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    key: &str,
+    value: u32,
+) -> Result<()> {
+    if header.infos().contains_key(key) {
+        info.insert(
+            key.to_owned(),
+            Some(InfoValue::Integer(checked_info_integer(value, key)?)),
+        );
+    }
+    Ok(())
+}
+
+fn insert_info_integer_array(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    key: &str,
+    values: &[u64],
+) -> Result<()> {
+    if header.infos().contains_key(key) {
+        let values = values
+            .iter()
+            .map(|&value| {
+                i32::try_from(value)
+                    .map(Some)
+                    .map_err(|_| invalid(format!("INFO/{key} exceeds the VCF integer range")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        info.insert(
+            key.to_owned(),
+            Some(InfoValue::Array(InfoArray::Integer(values))),
+        );
+    }
+    Ok(())
+}
+
+fn insert_info_float(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    key: &str,
+    value: f32,
+) -> Result<()> {
+    if header.infos().contains_key(key) {
+        info.insert(key.to_owned(), Some(InfoValue::Float(value)));
+    }
+    Ok(())
+}
+
+fn insert_optional_info_float(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    key: &str,
+    value: Option<f32>,
+) -> Result<()> {
+    if let Some(value) = value {
+        insert_info_float(header, info, key, value)?;
+    }
+    Ok(())
+}
+
+fn insert_info_float_array(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    key: &str,
+    values: &[f32],
+) -> Result<()> {
+    if header.infos().contains_key(key) {
+        info.insert(
+            key.to_owned(),
+            Some(InfoValue::Array(InfoArray::Float(
+                values.iter().copied().map(Some).collect(),
+            ))),
+        );
+    }
+    Ok(())
+}
+
 fn decode_indel_summary(record: &vcf::variant::RecordBuf) -> Result<Option<IndelSummary>> {
     let is_indel = match record.info().get(INDEL) {
         None => false,
@@ -640,12 +1054,78 @@ fn decode_sample(samples: &Samples, index: usize, allele_count: usize) -> Result
                 .ok_or_else(|| invalid("FORMAT/AD sum exceeds the supported range"))
         })?,
     };
-    let evidence = SampleEvidence::new(depth, allele_depths, allele_quality_sums)?;
+    let mut evidence = SampleEvidence::new(depth, allele_depths, allele_quality_sums)?;
+    let forward = sample_integer_array(samples, ADF, index)?;
+    let reverse = sample_integer_array(samples, ADR, index)?;
+    match (forward, reverse) {
+        (None, None) => {}
+        (Some(forward), Some(reverse))
+            if forward.len() == allele_count && reverse.len() == allele_count =>
+        {
+            let quality_means =
+                sample_integer_array(samples, QM, index)?.unwrap_or_else(|| vec![0; allele_count]);
+            if quality_means.len() != allele_count {
+                return Err(invalid("FORMAT/QM does not match the record alleles"));
+            }
+            let annotations = SampleAnnotations::new(
+                forward,
+                reverse,
+                quality_means,
+                sample_integer(samples, SP, index)?.unwrap_or(0),
+                sample_integer(samples, SCR, index)?.unwrap_or(0),
+            )?;
+            evidence = evidence.with_annotations(annotations)?;
+        }
+        _ => {
+            return Err(invalid(
+                "FORMAT/ADF and FORMAT/ADR must be present together and match the record alleles",
+            ));
+        }
+    }
     SampleLikelihood::new(
         ploidy,
         phred_likelihoods.map(Vec::into_boxed_slice),
         evidence,
     )
+}
+
+fn decode_site_annotations(record: &vcf::variant::RecordBuf) -> Result<Option<SiteAnnotations>> {
+    let Some(auxiliary) = info_float_array(record, I16)? else {
+        return Ok(None);
+    };
+    let auxiliary: [f32; 16] = auxiliary
+        .try_into()
+        .map_err(|_| invalid("INFO/I16 must contain 16 values"))?;
+    let average_mismatches = info_float_array(record, NM)?
+        .map(|values| {
+            values
+                .try_into()
+                .map_err(|_| invalid("INFO/NM must contain two values"))
+        })
+        .transpose()?;
+    let raw_depth = info_integer(record, DP)?.unwrap_or_else(|| {
+        auxiliary[..4]
+            .iter()
+            .copied()
+            .map(|value| value.max(0.0) as u32)
+            .sum()
+    });
+    SiteAnnotations::new(SiteAnnotationValues {
+        raw_depth,
+        auxiliary,
+        variant_distance_bias: info_float(record, VDB)?,
+        read_position_bias: info_float(record, RPBZ)?,
+        mapping_quality_bias: info_float(record, MQBZ)?,
+        base_quality_bias: info_float(record, BQBZ)?,
+        mapping_quality_strand_bias: info_float(record, MQSBZ)?,
+        mismatch_bias: info_float(record, NMBZ)?,
+        soft_clip_bias: info_float(record, SCBZ)?,
+        strand_bias: info_float(record, FS)?,
+        segregation_bias: info_float(record, SGB)?,
+        zero_mapping_quality_fraction: info_float(record, MQ0F)?.unwrap_or(0.0),
+        average_mismatches,
+    })
+    .map(Some)
 }
 
 fn info_quality_sums(record: &vcf::variant::RecordBuf, allele_count: usize) -> Result<Vec<f32>> {
@@ -664,6 +1144,41 @@ fn info_quality_sums(record: &vcf::variant::RecordBuf, allele_count: usize) -> R
         .iter()
         .map(|value| value.ok_or_else(|| invalid("INFO/QS contains a missing value")))
         .collect()
+}
+
+fn info_integer(record: &vcf::variant::RecordBuf, key: &str) -> Result<Option<u32>> {
+    match record.info().get(key) {
+        None | Some(None) => Ok(None),
+        Some(Some(InfoValue::Integer(value))) => u32::try_from(*value)
+            .map(Some)
+            .map_err(|_| invalid(format!("INFO/{key} contains a negative integer"))),
+        Some(Some(_)) => Err(invalid(format!("INFO/{key} is not an integer"))),
+    }
+}
+
+fn info_float(record: &vcf::variant::RecordBuf, key: &str) -> Result<Option<f32>> {
+    match record.info().get(key) {
+        None | Some(None) => Ok(None),
+        Some(Some(InfoValue::Float(value))) if value.is_finite() => Ok(Some(*value)),
+        Some(Some(InfoValue::Float(_))) => Err(invalid(format!("INFO/{key} is not finite"))),
+        Some(Some(_)) => Err(invalid(format!("INFO/{key} is not a float"))),
+    }
+}
+
+fn info_float_array(record: &vcf::variant::RecordBuf, key: &str) -> Result<Option<Vec<f32>>> {
+    match record.info().get(key) {
+        None | Some(None) => Ok(None),
+        Some(Some(InfoValue::Array(InfoArray::Float(values)))) => values
+            .iter()
+            .map(|value| match value {
+                Some(value) if value.is_finite() => Ok(*value),
+                Some(_) => Err(invalid(format!("INFO/{key} contains a non-finite value"))),
+                None => Err(invalid(format!("INFO/{key} contains a missing value"))),
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+        Some(Some(_)) => Err(invalid(format!("INFO/{key} is not a float array"))),
+    }
 }
 
 fn sample_integer(samples: &Samples, key: &str, index: usize) -> Result<Option<u32>> {

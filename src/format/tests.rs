@@ -114,7 +114,7 @@ fn decodes_bcftools_1_24_likelihood_record() {
             .lines()
             .last()
             .unwrap(),
-        "chr1\t1\t.\tA\tG,C,<*>\t.\t.\tQS=1,1,1,0\tPL:DP:AD:QS\t0,3,40,3,40,40,3,40,40,40:1:1,0,0,0:40,0,0,0\t40,40,40,3,3,0,40,40,3,40:1:0,0,1,0:0,0,40,0\t40,3,0,40,3,40,40,3,40,40:1:0,1,0,0:0,40,0,0"
+        "chr1\t1\t.\tA\tG,C,<*>\t.\t.\tQS=1,1,1,0;DP=3;I16=1,0,2,0,40,1600,80,3200,60,3600,120,7200,0,0,0,0;VDB=0.02;SGB=-0.94647;RPBZ=0;MQBZ=0;BQBZ=0;SCBZ=0;MQ0F=0\tPL:DP:AD:QS\t0,3,40,3,40,40,3,40,40,40:1:1,0,0,0:40,0,0,0\t40,40,40,3,3,0,40,40,3,40:1:0,0,1,0:0,0,40,0\t40,3,0,40,3,40,40,3,40,40:1:0,1,0,0:0,40,0,0"
     );
     let mut vcf_reader = vcf::io::Reader::new(&vcf_data[..]);
     let vcf_header = vcf_reader.read_header().unwrap();
@@ -159,6 +159,68 @@ fn builds_a_checked_likelihood_header() {
     assert!(schema.header().formats().contains_key(PL));
     assert!(schema.header().formats().contains_key(DP));
     assert!(schema.header().formats().contains_key(AD));
+}
+
+#[test]
+fn roundtrips_complete_pileup_annotations() {
+    let schema = LikelihoodVcfSchema::new([(b"MX".as_slice(), 9)], ["sample"]).unwrap();
+    let sample_annotations =
+        SampleAnnotations::new([4, 1, 0], [1, 4, 0], [27, 20, 0], 7, 2).unwrap();
+    let evidence = SampleEvidence::new(10, [5, 5, 0], [180, 100, 0])
+        .unwrap()
+        .with_annotations(sample_annotations)
+        .unwrap();
+    let annotations = SiteAnnotations::new(SiteAnnotationValues {
+        raw_depth: 10,
+        auxiliary: [
+            4.0, 1.0, 1.0, 4.0, 200.0, 8000.0, 100.0, 2000.0, 260.0, 14_800.0, 170.0, 6100.0, 20.0,
+            80.0, 20.0, 80.0,
+        ],
+        variant_distance_bias: Some(0.001_870_952_4),
+        read_position_bias: Some(0.0),
+        mapping_quality_bias: Some(-1.671_258_1),
+        base_quality_bias: Some(-3.0),
+        mapping_quality_strand_bias: Some(-2.785_43),
+        mismatch_bias: Some(1.671_258_1),
+        soft_clip_bias: Some(0.0),
+        strand_bias: Some(0.099_206_35),
+        segregation_bias: Some(-0.590_764_64),
+        zero_mapping_quality_fraction: 0.0,
+        average_mismatches: Some([0.6, 2.0]),
+    })
+    .unwrap();
+    let site = LikelihoodSite::new(
+        0,
+        4,
+        Allele::new(&b"A"[..]).unwrap(),
+        [
+            Allele::new(&b"C"[..]).unwrap(),
+            Allele::new(&b"<*>"[..]).unwrap(),
+        ],
+        [0.642_857_13, 0.357_142_87, 0.0],
+        [SampleLikelihood::observed(
+            Ploidy::new(2).unwrap(),
+            [56, 0, 118, 71, 133, 180],
+            evidence,
+        )
+        .unwrap()],
+    )
+    .unwrap()
+    .with_annotations(annotations);
+
+    let record = schema.encode_likelihood(&site).unwrap();
+    assert_eq!(record.info().get(SCR), Some(Some(&InfoValue::Integer(2))));
+    assert_eq!(
+        record
+            .samples()
+            .keys()
+            .as_ref()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [PL, DP, SP, ADF, ADR, AD, SCR, QUALITY_SUM, QM]
+    );
+    assert_eq!(schema.decode_likelihood(&record).unwrap(), site);
 }
 
 #[test]

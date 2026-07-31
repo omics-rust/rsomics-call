@@ -27,10 +27,13 @@ deletion likelihoods, sample-specific reference consensus, glocal realignment,
 STR penalties, typed indel annotations, zero-copy, haploid, diploid, and
 independently grouped multiallelic calls, a fused typed calling path, and strict
 likelihood and called-record streams for plain VCF, BGZF VCF, raw BCF, and BGZF
-BCF. These paths are checked against bcftools and HTSlib 1.24. It does not yet
-expose a command-line binary. Incomplete commands stay absent until consensus
-annotations, target-exclusion behavior, gVCF behavior, complete command
-orchestration, and oracle and performance gates pass.
+BCF. Pileup records carry the bcftools default bias metrics plus strand-aware
+allele depths, quality means and sums, strand bias, mismatch, and soft-clip
+annotations at sample and site scope. These paths are checked against bcftools
+and HTSlib 1.24. It does not yet expose a command-line binary. Incomplete
+commands stay absent until caller PV4 annotations, target-exclusion behavior,
+gVCF behavior, complete command orchestration, and oracle and performance gates
+pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
@@ -48,6 +51,10 @@ The established indel likelihood path follows bcftools 1.24
 `bam2bcf_indel.c` and `str_finder.c`, and HTSlib 1.24 `probaln.c`; their
 attribution and licenses are retained in `THIRD_PARTY_LICENSES.md`,
 `LICENSES/BCFTOOLS-MIT.txt`, and `LICENSES/HTSLIB-MIT.txt`.
+
+Pileup annotations follow bcftools 1.24 `bam2bcf.c`; Fisher exact and related
+numerical kernels follow HTSlib 1.24 `kfunc.c`. Their MIT notices are retained
+in the same license files.
 
 The revised MAQ error model follows HTSlib 1.24 `errmod.c`, Copyright Broad
 Institute and Genome Research Ltd., under the MIT/Expat license retained in

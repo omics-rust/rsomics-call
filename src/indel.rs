@@ -5,7 +5,9 @@ use rsomics_pileup::{Column, PileupRead};
 
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, IndelSummary, LikelihoodMatrix, LikelihoodSite,
-    Nucleotide, Ploidy, Result, SampleEvidence, SampleLikelihood, glocal,
+    Nucleotide, Ploidy, Result, SampleEvidence, SampleLikelihood,
+    annotation::{AnnotationEvidence, AnnotationObservation, site_annotations},
+    glocal,
 };
 
 const MAX_TYPES: usize = 64;
@@ -290,13 +292,15 @@ impl IndelSiteBuilder {
             indel_region,
             &mut fetch_reference,
         )?;
-        let samples = self.build_samples(&reads, self.sample_count, selected.len())?;
+        let (samples, annotation_evidence) =
+            self.build_samples(&reads, self.sample_count, selected.len())?;
         let allele_quality_sums = normalized_quality_sums(&samples);
         let reference_sequence_id = usize::try_from(column.reference_id())
             .map_err(|_| CallError::InvalidPileupCoordinate)?;
         let position = u64::try_from(position).map_err(|_| CallError::InvalidPileupCoordinate)?;
         let mut alleles = alleles.into_iter();
         let reference = alleles.next().ok_or(CallError::IndelRealignment)?;
+        let annotations = site_annotations(annotation_evidence.iter(), true, true)?;
         let site = LikelihoodSite::new(
             reference_sequence_id,
             position,
@@ -308,7 +312,8 @@ impl IndelSiteBuilder {
         .with_indel_summary(IndelSummary::new(
             candidates.maximum_support,
             candidates.maximum_fraction,
-        )?);
+        )?)
+        .with_annotations(annotations);
         Ok(Some(site))
     }
 
@@ -317,65 +322,96 @@ impl IndelSiteBuilder {
         reads: &[Read<'_>],
         sample_count: usize,
         allele_count: usize,
-    ) -> Result<Vec<SampleLikelihood>> {
+    ) -> Result<(Vec<SampleLikelihood>, Vec<AnnotationEvidence>)> {
         let diploid = Ploidy::new(2).unwrap();
-        (0..sample_count)
-            .map(|sample| {
-                self.observations.clear();
-                let mut depth = 0u64;
-                let mut allele_depths = vec![0u64; allele_count];
-                let mut quality_sums = vec![0u64; allele_count];
-                let sample_depth = reads.iter().filter(|read| read.sample == sample).count();
-                for read in reads.iter().filter(|read| read.sample == sample) {
-                    depth += 1;
-                    let mut allele = read.assigned_type;
-                    let mut quality = read.indel_quality;
-                    let mut sequence_quality = read.sequence_quality;
-                    if read.projection.indel == 0
-                        && (usize::from(quality) < sample_depth / 2 || sample_depth > 20)
-                    {
-                        allele = 0;
-                        let base_quality = read
-                            .record
-                            .quality_scores()
-                            .get(read.projection.qpos)
-                            .copied()
-                            .unwrap_or(255);
-                        sequence_quality = ((3 * u16::from(sequence_quality)
-                            + 2 * u16::from(base_quality))
-                            / 8) as u8;
-                    }
-                    if sample_depth > 20 {
-                        sequence_quality = sequence_quality.min(40);
-                    }
-                    if quality < self.config.minimum_base_quality || allele >= allele_count {
-                        continue;
-                    }
-                    quality = quality.min(sequence_quality);
-                    let mapping_quality = match read.record.mapping_quality() {
-                        255 => 20,
-                        value => value,
-                    }
-                    .min(self.config.mapping_quality_cap);
-                    quality = quality.min(mapping_quality).clamp(4, 63);
-                    allele_depths[allele] += 1;
-                    quality_sums[allele] += u64::from(quality);
-                    self.observations.push(BaseObservation::new(
-                        allele_nucleotide(allele),
-                        quality,
-                        read.record.flags() & REVERSE != 0,
-                    ));
+        let mut samples = Vec::with_capacity(sample_count);
+        let mut annotation_evidence = Vec::with_capacity(sample_count);
+        for sample in 0..sample_count {
+            self.observations.clear();
+            let mut depth = 0u64;
+            let mut allele_depths = vec![0u64; allele_count];
+            let mut quality_sums = vec![0u64; allele_count];
+            let mut annotations = AnnotationEvidence::default();
+            let sample_depth = reads
+                .iter()
+                .filter(|read| read.sample == sample && !read.projection.is_reference_skip)
+                .count();
+            for read in reads.iter().filter(|read| read.sample == sample) {
+                annotations.begin_read(&read.cigar);
+                annotations.observe_indel_candidate(read.record, read.projection, &read.cigar);
+                if read.projection.is_reference_skip {
+                    continue;
                 }
-                let matrix = self.model.calculate(&mut self.observations)?;
-                let phred_likelihoods = likelihoods(&matrix, allele_count);
-                let evidence = SampleEvidence::new(
-                    u32::try_from(depth).map_err(|_| CallError::IndelEvidenceOverflow)?,
-                    checked_counts(&allele_depths)?,
-                    checked_counts(&quality_sums)?,
-                )?;
-                SampleLikelihood::observed(diploid, phred_likelihoods, evidence)
-            })
-            .collect()
+                annotations.add_raw_depth();
+                let mut allele = read.assigned_type;
+                let mut quality = read.indel_quality;
+                let original_sequence_quality = read.sequence_quality;
+                let mut sequence_quality = original_sequence_quality;
+                if read.projection.indel == 0
+                    && (usize::from(quality) < sample_depth / 2 || sample_depth > 20)
+                {
+                    allele = 0;
+                    let base_quality = read
+                        .record
+                        .quality_scores()
+                        .get(read.projection.qpos)
+                        .copied()
+                        .unwrap_or(255);
+                    sequence_quality =
+                        ((3 * u16::from(sequence_quality) + 2 * u16::from(base_quality)) / 8) as u8;
+                }
+                if sample_depth > 20 {
+                    sequence_quality = sequence_quality.min(40);
+                }
+                if quality < self.config.minimum_base_quality || allele >= allele_count {
+                    continue;
+                }
+                depth += 1;
+                quality = quality.min(sequence_quality);
+                let raw_mapping_quality = match read.record.mapping_quality() {
+                    255 => 20,
+                    value => value,
+                };
+                let mapping_quality = raw_mapping_quality.min(self.config.mapping_quality_cap);
+                quality = quality.min(mapping_quality).clamp(4, 63);
+                allele_depths[allele] += 1;
+                quality_sums[allele] += u64::from(quality);
+                annotations.observe(
+                    read.record,
+                    read.projection,
+                    &read.cigar,
+                    AnnotationObservation {
+                        allele,
+                        is_reference: allele == 0,
+                        base_quality: original_sequence_quality,
+                        raw_mapping_quality,
+                        mapping_quality,
+                        effective_quality: quality,
+                    },
+                );
+                self.observations.push(BaseObservation::new(
+                    allele_nucleotide(allele),
+                    quality,
+                    read.record.flags() & REVERSE != 0,
+                ));
+            }
+            let matrix = self.model.calculate(&mut self.observations)?;
+            let phred_likelihoods = likelihoods(&matrix, allele_count);
+            let selected = (0..allele_count).collect::<Vec<_>>();
+            let evidence = SampleEvidence::new(
+                u32::try_from(depth).map_err(|_| CallError::IndelEvidenceOverflow)?,
+                checked_counts(&allele_depths)?,
+                checked_counts(&quality_sums)?,
+            )?
+            .with_annotations(annotations.sample_annotations(&selected)?)?;
+            samples.push(SampleLikelihood::observed(
+                diploid,
+                phred_likelihoods,
+                evidence,
+            )?);
+            annotation_evidence.push(annotations);
+        }
+        Ok((samples, annotation_evidence))
     }
 }
 

@@ -692,16 +692,7 @@ fn trimmed_fields(
     ploidy: CallPloidy,
     retain_likelihoods: bool,
 ) -> Result<(Option<Box<[u32]>>, SampleEvidence)> {
-    let evidence = sample.evidence();
-    let allele_depths = retained
-        .iter()
-        .map(|&index| evidence.allele_depths()[index])
-        .collect::<Vec<_>>();
-    let allele_quality_sums = retained
-        .iter()
-        .map(|&index| evidence.allele_quality_sums()[index])
-        .collect::<Vec<_>>();
-    let evidence = SampleEvidence::new(evidence.depth(), allele_depths, allele_quality_sums)?;
+    let evidence = sample.evidence().select(retained)?;
     let phred_likelihoods = retain_likelihoods
         .then(|| {
             sample.phred_likelihoods().map(|values| {
