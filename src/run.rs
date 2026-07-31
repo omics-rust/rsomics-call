@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use noodles::{
@@ -8,8 +9,9 @@ use noodles::{
 use rsomics_pileup::{PileupEngine, PileupOptions};
 
 use crate::{
-    AlignmentInput, AlignmentSet, CallError, CalledSite, LikelihoodSite, Nucleotide,
-    ReferenceSequence, Result, SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder,
+    AlignmentInput, AlignmentSet, CallError, CalledSite, CalledVariantWriter, CalledVcfSchema,
+    LikelihoodSite, LikelihoodVariantReader, Nucleotide, ReferenceSequence, Result, SampleMap,
+    SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder, VariantOutputFormat,
 };
 
 pub struct SnpLikelihoodRun {
@@ -80,6 +82,29 @@ impl SnpLikelihoodRun {
     ) -> Result<()> {
         self.run(|site| emit(call(&site)?))
     }
+}
+
+pub fn run_likelihood_calls<R, W>(
+    mut reader: LikelihoodVariantReader<R>,
+    writer: W,
+    output_schema: CalledVcfSchema,
+    output_format: VariantOutputFormat,
+    mut call: impl FnMut(&LikelihoodSite) -> Result<CalledSite>,
+) -> Result<W>
+where
+    R: Read,
+    W: Write,
+{
+    let mut writer = CalledVariantWriter::new(writer, output_schema, output_format)?;
+    while let Some(site) = reader.read_site()? {
+        let record = reader.record_number();
+        let called = call(&site).map_err(|error| CallError::LikelihoodCallRecord {
+            record,
+            source: Box::new(error),
+        })?;
+        writer.write_site(&called)?;
+    }
+    writer.finish()
 }
 
 fn drain_sites(
@@ -191,9 +216,15 @@ fn reference_error(path: &Path, error: impl std::fmt::Display) -> CallError {
 mod tests {
     use std::io::Write;
 
+    use noodles::vcf;
+    use noodles_util::variant;
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::{
+        Allele, ConsensusCaller, LikelihoodVariantWriter, LikelihoodVcfSchema, Ploidy,
+        SampleEvidence, SampleLikelihood,
+    };
 
     fn sam_file(sample: &str, base: char) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -394,5 +425,89 @@ mod tests {
             sites[0].samples()[0].phred_likelihoods(),
             Some(&[0, 6, 73][..])
         );
+    }
+
+    #[test]
+    fn streams_likelihood_calls_across_all_variant_encodings() {
+        let formats = [
+            VariantOutputFormat::Vcf,
+            VariantOutputFormat::VcfBgzf,
+            VariantOutputFormat::BcfRaw,
+            VariantOutputFormat::BcfBgzf,
+        ];
+        let sites = [
+            likelihood_site(0, Some([0, 3, 40])),
+            likelihood_site(1, Some([220, 99, 0])),
+        ];
+
+        for format in formats {
+            let schema = LikelihoodVcfSchema::new([(b"chr1".as_slice(), 20)], ["sample"]).unwrap();
+            let mut input =
+                LikelihoodVariantWriter::new(Vec::new(), schema.clone(), format).unwrap();
+            for site in &sites {
+                input.write_site(site).unwrap();
+            }
+            let input = input.finish().unwrap();
+            let reader = LikelihoodVariantReader::new(&input[..]).unwrap();
+            let output_schema = CalledVcfSchema::from_consensus_likelihood(reader.schema());
+            let output = run_likelihood_calls(reader, Vec::new(), output_schema, format, |site| {
+                ConsensusCaller::default().call(site)
+            })
+            .unwrap();
+            let mut reader = variant::io::Reader::new(&output[..]).unwrap();
+            let header = reader.read_header().unwrap();
+            assert!(!header.formats().contains_key("GP"));
+            let mut record = variant::Record::default();
+
+            for position in [1, 2] {
+                assert_ne!(reader.read_record(&mut record).unwrap(), 0);
+                let record =
+                    vcf::variant::RecordBuf::try_from_variant_record(&header, &record).unwrap();
+                assert_eq!(record.variant_start().map(usize::from), Some(position));
+            }
+            assert_eq!(reader.read_record(&mut record).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn reports_the_record_that_cannot_be_called() {
+        let schema = LikelihoodVcfSchema::new([(b"chr1".as_slice(), 20)], ["sample"]).unwrap();
+        let mut input =
+            LikelihoodVariantWriter::new(Vec::new(), schema.clone(), VariantOutputFormat::Vcf)
+                .unwrap();
+        input.write_site(&likelihood_site(0, None)).unwrap();
+        let input = input.finish().unwrap();
+        let reader = LikelihoodVariantReader::new(&input[..]).unwrap();
+        let output_schema = CalledVcfSchema::from_consensus_likelihood(reader.schema());
+
+        assert!(matches!(
+            run_likelihood_calls(
+                reader,
+                Vec::new(),
+                output_schema,
+                VariantOutputFormat::Vcf,
+                |site| ConsensusCaller::default().call(site),
+            ),
+            Err(CallError::LikelihoodCallRecord { record: 1, .. })
+        ));
+    }
+
+    fn likelihood_site(position: u64, likelihoods: Option<[u32; 3]>) -> LikelihoodSite {
+        let evidence = SampleEvidence::new(1, [1, 0], [40, 0]).unwrap();
+        let sample = match likelihoods {
+            Some(values) => {
+                SampleLikelihood::observed(Ploidy::new(2).unwrap(), values, evidence).unwrap()
+            }
+            None => SampleLikelihood::new(Ploidy::new(2).unwrap(), None, evidence).unwrap(),
+        };
+        LikelihoodSite::new(
+            0,
+            position,
+            Allele::new(&b"A"[..]).unwrap(),
+            [Allele::new(&b"G"[..]).unwrap()],
+            [1.0, 1.0],
+            [sample],
+        )
+        .unwrap()
     }
 }

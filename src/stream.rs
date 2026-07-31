@@ -43,6 +43,10 @@ where
         &self.schema
     }
 
+    pub fn record_number(&self) -> u64 {
+        self.record_number
+    }
+
     pub fn read_site(&mut self) -> Result<Option<LikelihoodSite>> {
         let record_number = self.record_number + 1;
         let size = self

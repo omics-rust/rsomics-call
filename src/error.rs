@@ -101,6 +101,9 @@ pub enum CallError {
     #[error("likelihood VCF/BCF record {record}: {message}")]
     LikelihoodVariantRecord { record: u64, message: String },
 
+    #[error("likelihood call record {record}: {source}")]
+    LikelihoodCallRecord { record: u64, source: Box<CallError> },
+
     #[error("variant VCF/BCF output: {0}")]
     VariantOutput(String),
 }

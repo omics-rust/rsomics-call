@@ -21,7 +21,7 @@ pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use format::{CalledVcfSchema, LikelihoodVcfSchema};
 pub use model::{Allele, LikelihoodSite, Ploidy, SampleEvidence, SampleLikelihood};
-pub use run::SnpLikelihoodRun;
+pub use run::{SnpLikelihoodRun, run_likelihood_calls};
 pub use samples::{SampleMap, SampleMapBuilder, SampleSelection};
 pub use snp::{SnpEvidence, SnpLikelihoodConfig, SnpSiteBuilder};
 pub use stream::{
