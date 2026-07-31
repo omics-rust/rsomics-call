@@ -64,9 +64,6 @@ pub enum CallError {
 
     #[error("SNP evidence exceeds the supported count range")]
     SnpEvidenceOverflow,
-
-    #[error("the MAQ error model accepts at most 255 observations per sample")]
-    ErrorModelDepth,
 }
 
 pub type Result<T> = std::result::Result<T, CallError>;

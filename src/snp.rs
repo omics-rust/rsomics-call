@@ -31,6 +31,7 @@ pub struct SnpLikelihoodConfig {
     maximum_base_quality: u8,
     neighboring_quality_delta: u8,
     mapping_quality_cap: u8,
+    random_seed: i32,
 }
 
 impl SnpLikelihoodConfig {
@@ -48,7 +49,13 @@ impl SnpLikelihoodConfig {
             maximum_base_quality,
             neighboring_quality_delta,
             mapping_quality_cap,
+            random_seed: 0,
         })
+    }
+
+    pub fn with_random_seed(mut self, seed: i32) -> Self {
+        self.random_seed = seed;
+        self
     }
 }
 
@@ -59,6 +66,7 @@ impl Default for SnpLikelihoodConfig {
             maximum_base_quality: 60,
             neighboring_quality_delta: 30,
             mapping_quality_cap: 60,
+            random_seed: 0,
         }
     }
 }
@@ -76,7 +84,7 @@ impl SnpEvidence {
         column: &Column<'_>,
         reference_base: Nucleotide,
         config: SnpLikelihoodConfig,
-        model: &ErrorModel,
+        model: &mut ErrorModel,
         observations: &mut Vec<BaseObservation>,
     ) -> Result<Self> {
         let mut accumulator = SnpAccumulator::with_observations(std::mem::take(observations));
@@ -185,7 +193,7 @@ impl SnpAccumulator {
         ));
     }
 
-    fn finish(&mut self, model: &ErrorModel) -> Result<SnpEvidence> {
+    fn finish(&mut self, model: &mut ErrorModel) -> Result<SnpEvidence> {
         Ok(SnpEvidence {
             likelihoods: model.calculate(&mut self.observations)?,
             depth: u32::try_from(self.depth).map_err(|_| CallError::SnpEvidenceOverflow)?,
@@ -208,7 +216,7 @@ impl SnpSiteBuilder {
         }
         Ok(Self {
             config,
-            model: ErrorModel::default(),
+            model: ErrorModel::with_random_seed(config.random_seed),
             samples: std::iter::repeat_with(SnpAccumulator::default)
                 .take(sample_count)
                 .collect(),
@@ -241,10 +249,11 @@ impl SnpSiteBuilder {
             );
         }
 
+        let model = &mut self.model;
         let evidence = self
             .samples
             .iter_mut()
-            .map(|sample| sample.finish(&self.model))
+            .map(|sample| sample.finish(model))
             .collect::<Result<Vec<_>>>()?;
         let alleles = selected_alleles(reference_base, &evidence)?;
         let allele_count = alleles.len();
@@ -462,7 +471,7 @@ mod tests {
         }
         engine.finish().unwrap();
 
-        let model = ErrorModel::default();
+        let mut model = ErrorModel::default();
         let mut observations = Vec::new();
         let mut evidence = None;
         engine
@@ -473,7 +482,7 @@ mod tests {
                             column,
                             Nucleotide::A,
                             SnpLikelihoodConfig::default(),
-                            &model,
+                            &mut model,
                             &mut observations,
                         )
                         .unwrap(),

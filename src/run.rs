@@ -200,6 +200,25 @@ mod tests {
         file
     }
 
+    fn repeated_sam_file(count: usize) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "@HD\tVN:1.6\tSO:coordinate\n\
+             @SQ\tSN:chr1\tLN:20\n\
+             @RG\tID:rg\tSM:S1"
+        )
+        .unwrap();
+        for index in 0..count {
+            writeln!(
+                file,
+                "read{index}\t0\tchr1\t1\t60\t1M\t*\t0\t0\tA\tI\tRG:Z:rg"
+            )
+            .unwrap();
+        }
+        file
+    }
+
     #[test]
     fn streams_cram_records_into_likelihood_sites() {
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
@@ -289,6 +308,37 @@ mod tests {
         assert_eq!(
             site.samples()[1].phred_likelihoods(),
             Some(&[40, 3, 0, 40, 3, 40][..])
+        );
+    }
+
+    #[test]
+    fn matches_bcftools_1_24_per_input_depth_limit() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+        let input = repeated_sam_file(5);
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, input.path(), "input")],
+            fixtures.join("alignment-reference.fa"),
+            SampleSelection::default(),
+            PileupOptions {
+                maximum_depth_per_source: Some(2),
+                ..PileupOptions::default()
+            },
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap();
+
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].samples()[0].depth(), 2);
+        assert_eq!(
+            sites[0].samples()[0].phred_likelihoods(),
+            Some(&[0, 6, 73][..])
         );
     }
 }

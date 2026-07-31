@@ -18,7 +18,7 @@ doctest = false
 [dependencies]
 noodles = { version = "0.110", features = ["bam", "bgzf", "core", "cram", "fasta", "sam"] }
 rsomics-bamio = "0.2"
-rsomics-pileup = { version = "0.2", git = "https://github.com/omics-rust/rsomics-pileup", rev = "0d4414364d5958980ba6c4962673ad256580f1ef" }
+rsomics-pileup = { version = "0.2", git = "https://github.com/omics-rust/rsomics-pileup", rev = "d15b1a90aca0d14f1847e227b379616e47cf8b8f" }
 thiserror = "2"
 
 [dev-dependencies]

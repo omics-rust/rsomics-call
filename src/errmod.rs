@@ -43,6 +43,7 @@ pub struct ErrorModel {
     log_binomial: Box<[f64]>,
     heterozygous: Box<[f64]>,
     beta: Box<[OnceLock<Box<[f64]>>]>,
+    random: HtsRandom,
 }
 
 impl Default for ErrorModel {
@@ -57,6 +58,17 @@ impl ErrorModel {
     }
 
     pub fn with_dependency_correlation(dependency_correlation: f64) -> Result<Self> {
+        Self::with_dependency_correlation_and_seed(dependency_correlation, 0)
+    }
+
+    pub fn with_random_seed(seed: i32) -> Self {
+        Self::with_dependency_correlation_and_seed(0.17, seed).unwrap()
+    }
+
+    pub fn with_dependency_correlation_and_seed(
+        dependency_correlation: f64,
+        seed: i32,
+    ) -> Result<Self> {
         if !dependency_correlation.is_finite() || !(0.0..=1.0).contains(&dependency_correlation) {
             return Err(CallError::InvalidDependencyCorrelation);
         }
@@ -90,13 +102,16 @@ impl ErrorModel {
             beta: std::iter::repeat_with(OnceLock::new)
                 .take(MAX_DEPTH + 1)
                 .collect(),
+            random: HtsRandom::new(seed),
         })
     }
 
-    pub fn calculate(&self, observations: &mut [BaseObservation]) -> Result<LikelihoodMatrix> {
+    pub fn calculate(&mut self, observations: &mut [BaseObservation]) -> Result<LikelihoodMatrix> {
         if observations.len() > MAX_DEPTH {
-            return Err(CallError::ErrorModelDepth);
+            self.random.shuffle(observations);
         }
+        let depth = observations.len().min(MAX_DEPTH);
+        let observations = &mut observations[..depth];
         let depth = observations.len();
         let mut output = [0.0; BASES * BASES];
         if depth == 0 {
@@ -172,6 +187,31 @@ impl ErrorModel {
             }
         }
         beta.into_boxed_slice()
+    }
+}
+
+struct HtsRandom {
+    state: u64,
+}
+
+impl HtsRandom {
+    fn new(seed: i32) -> Self {
+        Self {
+            state: u64::from(seed as u32) << 16 | 0x330e,
+        }
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        self.state =
+            (0x5deece66du64.wrapping_mul(self.state).wrapping_add(0xb)) & ((1u64 << 48) - 1);
+        self.state as f64 / (1u64 << 48) as f64
+    }
+
+    fn shuffle<T>(&mut self, values: &mut [T]) {
+        for end in (2..=values.len()).rev() {
+            let index = (self.next_f64() * end as f64) as usize;
+            values.swap(index, end - 1);
+        }
     }
 }
 
@@ -272,11 +312,44 @@ mod tests {
     }
 
     #[test]
-    fn rejects_depth_that_requires_sampling_policy() {
-        let mut observations = vec![BaseObservation::new(Nucleotide::A, 40, false); 256];
-        assert_eq!(
-            ErrorModel::default().calculate(&mut observations),
-            Err(CallError::ErrorModelDepth)
+    #[allow(clippy::excessive_precision)]
+    fn matches_htslib_1_24_deep_sampling_stream() {
+        fn observations() -> Vec<BaseObservation> {
+            (0..300)
+                .map(|index| {
+                    BaseObservation::new(
+                        if index % 3 == 0 {
+                            Nucleotide::G
+                        } else {
+                            Nucleotide::A
+                        },
+                        20 + (index % 41) as u8,
+                        index % 5 == 0,
+                    )
+                })
+                .collect()
+        }
+
+        let mut model = ErrorModel::with_random_seed(0);
+        let mut first = observations();
+        assert_matrix(
+            &model.calculate(&mut first).unwrap(),
+            [
+                504.332642, 1028.13147, 88.087204, 1028.13147, 1028.13147, 1028.13147, 1161.66272,
+                901.167419, 1161.66272, 1161.66272, 88.087204, 901.167419, 657.330017, 901.167419,
+                901.167419, 1028.13147, 1161.66272, 901.167419, 1161.66272, 1161.66272, 1028.13147,
+                1161.66272, 901.167419, 1161.66272, 1161.66272,
+            ],
+        );
+        let mut second = observations();
+        assert_matrix(
+            &model.calculate(&mut second).unwrap(),
+            [
+                506.537384, 1039.36719, 98.3605499, 1039.36719, 1039.36719, 1039.36719, 1178.02258,
+                906.291626, 1178.02258, 1178.02258, 98.3605499, 906.291626, 671.485229, 906.291626,
+                906.291626, 1039.36719, 1178.02258, 906.291626, 1178.02258, 1178.02258, 1039.36719,
+                1178.02258, 906.291626, 1178.02258, 1178.02258,
+            ],
         );
     }
 
