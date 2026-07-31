@@ -88,6 +88,15 @@ pub enum CallError {
 
     #[error("invalid likelihood VCF/BCF: {0}")]
     InvalidLikelihoodVariant(String),
+
+    #[error("likelihood VCF/BCF input: {0}")]
+    LikelihoodVariantInput(String),
+
+    #[error("likelihood VCF/BCF record {record}: {message}")]
+    LikelihoodVariantRecord { record: u64, message: String },
+
+    #[error("variant VCF/BCF output: {0}")]
+    VariantOutput(String),
 }
 
 pub type Result<T> = std::result::Result<T, CallError>;
