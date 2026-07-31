@@ -1,12 +1,13 @@
 use std::fs::File;
 use std::io::{Read, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use noodles::{
     core::{Position, Region},
     fasta,
 };
-use rsomics_pileup::{PileupEngine, PileupOptions};
+use rsomics_pileup::{BaqOptions, PileupEngine, PileupOptions};
 
 use crate::{
     AlignmentInput, AlignmentSet, CallError, CalledSite, CalledVariantWriter, CalledVcfSchema,
@@ -19,6 +20,20 @@ pub struct SnpLikelihoodRun {
     reference: ReferenceCache,
     pileup: PileupEngine,
     sites: SnpSiteBuilder,
+    baq: Option<BaqRun>,
+}
+
+#[derive(Clone, Copy)]
+struct BaqRun {
+    mode: BaqMode,
+    maximum_read_len: usize,
+    options: BaqOptions,
+}
+
+#[derive(Clone, Copy)]
+enum BaqMode {
+    Full,
+    Partial,
 }
 
 impl SnpLikelihoodRun {
@@ -43,6 +58,7 @@ impl SnpLikelihoodRun {
             reference,
             pileup,
             sites,
+            baq: None,
         })
     }
 
@@ -54,6 +70,28 @@ impl SnpLikelihoodRun {
         self.alignments.samples()
     }
 
+    pub fn with_full_baq(mut self, maximum_read_len: usize, redo: bool) -> Self {
+        self.set_baq(BaqMode::Full, maximum_read_len, redo);
+        self
+    }
+
+    pub fn with_partial_baq(mut self, maximum_read_len: usize, redo: bool) -> Self {
+        self.set_baq(BaqMode::Partial, maximum_read_len, redo);
+        self
+    }
+
+    fn set_baq(&mut self, mode: BaqMode, maximum_read_len: usize, redo: bool) {
+        self.baq = Some(BaqRun {
+            mode,
+            maximum_read_len,
+            options: BaqOptions {
+                adjust_qualities: true,
+                extended: true,
+                redo,
+            },
+        });
+    }
+
     pub fn run(mut self, mut emit: impl FnMut(LikelihoodSite) -> Result<()>) -> Result<()> {
         while let Some((source_id, record)) = self.alignments.next_record()? {
             self.pileup.push_with_source(source_id, record)?;
@@ -62,6 +100,7 @@ impl SnpLikelihoodRun {
                 &mut self.reference,
                 &mut self.sites,
                 self.alignments.samples(),
+                self.baq,
                 &mut emit,
             )?;
         }
@@ -71,6 +110,7 @@ impl SnpLikelihoodRun {
             &mut self.reference,
             &mut self.sites,
             self.alignments.samples(),
+            self.baq,
             &mut emit,
         )
     }
@@ -112,11 +152,31 @@ fn drain_sites(
     reference: &mut ReferenceCache,
     sites: &mut SnpSiteBuilder,
     samples: &SampleMap,
+    baq: Option<BaqRun>,
     emit: &mut impl FnMut(LikelihoodSite) -> Result<()>,
 ) -> Result<()> {
-    pileup.drain(|column| {
+    pileup.drain_with(|context| {
+        if let Some(baq) = baq {
+            let mut fetch_reference = |reference_id, range, buffer: &mut Vec<u8>| {
+                buffer.extend_from_slice(reference.sequence(reference_id, range)?);
+                Ok::<_, CallError>(())
+            };
+            match baq.mode {
+                BaqMode::Full => context.apply_full_baq(
+                    baq.maximum_read_len,
+                    baq.options,
+                    &mut fetch_reference,
+                )?,
+                BaqMode::Partial => context.apply_partial_baq(
+                    baq.maximum_read_len,
+                    baq.options,
+                    &mut fetch_reference,
+                )?,
+            }
+        }
+        let column = context.column();
         let reference_base = reference.base(column.reference_id(), column.position())?;
-        let site = sites.build(column, reference_base, |source_id, record| {
+        let site = sites.build(&column, reference_base, |source_id, record| {
             samples.sample_index(source_id, record)
         })?;
         emit(site)
@@ -156,26 +216,47 @@ impl ReferenceCache {
     }
 
     fn base(&mut self, reference_id: i32, position: i64) -> Result<Nucleotide> {
+        let position =
+            usize::try_from(position).map_err(|error| reference_error(&self.path, error))?;
+        let end = position
+            .checked_add(1)
+            .ok_or_else(|| reference_error(&self.path, "reference position overflows"))?;
+        let base = self.sequence(reference_id, position..end)?[0];
+        Ok(match base.to_ascii_uppercase() {
+            b'A' => Nucleotide::A,
+            b'C' => Nucleotide::C,
+            b'G' => Nucleotide::G,
+            b'T' => Nucleotide::T,
+            _ => Nucleotide::N,
+        })
+    }
+
+    fn sequence(&mut self, reference_id: i32, range: Range<usize>) -> Result<&[u8]> {
         const CHUNK_SIZE: usize = 1024 * 1024;
 
         let reference_id =
             usize::try_from(reference_id).map_err(|error| reference_error(&self.path, error))?;
-        let position =
-            usize::try_from(position).map_err(|error| reference_error(&self.path, error))?;
         let (name, length) = self
             .references
             .get(reference_id)
             .map(|(name, length)| (name.to_vec(), *length))
             .ok_or_else(|| reference_error(&self.path, "reference ID is absent"))?;
         let length = usize::try_from(length).map_err(|error| reference_error(&self.path, error))?;
+        if range.start >= range.end || range.end > length {
+            return Err(reference_error(
+                &self.path,
+                "requested reference range is invalid",
+            ));
+        }
         if self.reference_id != Some(reference_id)
-            || position < self.sequence_start
-            || position >= self.sequence_start + self.sequence.len()
+            || range.start < self.sequence_start
+            || range.end > self.sequence_start + self.sequence.len()
         {
-            let start = position / CHUNK_SIZE * CHUNK_SIZE;
-            let end = start
+            let start = range.start / CHUNK_SIZE * CHUNK_SIZE;
+            let chunk_end = start
                 .checked_add(CHUNK_SIZE)
                 .map_or(length, |end| end.min(length));
+            let end = chunk_end.max(range.end);
             let interval_start = Position::try_from(start + 1)
                 .map_err(|error| reference_error(&self.path, error))?;
             let interval_end =
@@ -189,19 +270,17 @@ impl ReferenceCache {
             self.reference_id = Some(reference_id);
             self.sequence_start = start;
         }
-        let offset = position
+        let start = range
+            .start
             .checked_sub(self.sequence_start)
             .ok_or_else(|| reference_error(&self.path, "invalid reference cache position"))?;
-        let base = *self.sequence.get(offset).ok_or_else(|| {
-            reference_error(&self.path, "pileup position is outside the reference")
-        })?;
-        Ok(match base.to_ascii_uppercase() {
-            b'A' => Nucleotide::A,
-            b'C' => Nucleotide::C,
-            b'G' => Nucleotide::G,
-            b'T' => Nucleotide::T,
-            _ => Nucleotide::N,
-        })
+        let end = range
+            .end
+            .checked_sub(self.sequence_start)
+            .ok_or_else(|| reference_error(&self.path, "invalid reference cache position"))?;
+        self.sequence
+            .get(start..end)
+            .ok_or_else(|| reference_error(&self.path, "reference range is outside the cache"))
     }
 }
 
@@ -214,6 +293,7 @@ fn reference_error(path: &Path, error: impl std::fmt::Display) -> CallError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Write;
 
     use noodles::vcf;
@@ -424,6 +504,153 @@ mod tests {
         assert_eq!(
             sites[0].samples()[0].phred_likelihoods(),
             Some(&[0, 6, 73][..])
+        );
+    }
+
+    #[test]
+    fn full_baq_matches_bcftools_1_24_likelihoods() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        let alignment = directory.path().join("alignment.sam");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        fs::write(
+            &alignment,
+            b"@HD\tVN:1.6\tSO:coordinate\n\
+              @SQ\tSN:MX\tLN:11\n\
+              @RG\tID:rg\tSM:sample\n\
+              M\t64\tMX\t1\t60\t11M\t*\t0\t0\tCGTCTCCTACG\tIIIIIIIIIII\tRG:Z:rg\n\
+              X\t64\tMX\t1\t60\t5=1X5=\t*\t0\t0\tCGTCTCCTACG\tIIIIIIIIIII\tRG:Z:rg\n",
+        )
+        .unwrap();
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, alignment, "input")],
+            reference,
+            SampleSelection::default(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_full_baq(500, false);
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(sites.len(), 11);
+        assert_eq!(
+            sites[0].samples()[0].phred_likelihoods(),
+            Some(&[0, 6, 66][..])
+        );
+        assert_eq!(
+            sites[5].samples()[0].phred_likelihoods(),
+            Some(&[73, 6, 0, 73, 6, 73][..])
+        );
+        assert_eq!(
+            sites[10].samples()[0].phred_likelihoods(),
+            Some(&[0, 6, 66][..])
+        );
+    }
+
+    #[test]
+    fn full_baq_and_overlap_order_matches_bcftools_1_24() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        let alignment = directory.path().join("alignment.sam");
+        fs::write(&reference, b">chr1\nAAAAAAA\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"chr1\t7\t6\t7\t8\n").unwrap();
+        fs::write(
+            &alignment,
+            b"@HD\tVN:1.6\tSO:coordinate\n\
+              @SQ\tSN:chr1\tLN:7\n\
+              @RG\tID:rg\tSM:sample\n\
+              pair\t99\tchr1\t1\t60\t5M\t=\t3\t7\tAAAAA\tIIIII\tRG:Z:rg\n\
+              pair\t147\tchr1\t3\t60\t5M\t=\t1\t-7\tAAAAA\tIIIII\tRG:Z:rg\n",
+        )
+        .unwrap();
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, alignment, "input")],
+            reference,
+            SampleSelection::default(),
+            PileupOptions {
+                adjust_overlaps: true,
+                ..PileupOptions::default()
+            },
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_full_baq(500, false);
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(sites.len(), 7);
+        for index in [0, 1, 6] {
+            assert_eq!(
+                sites[index].samples()[0].phred_likelihoods(),
+                Some(&[0, 3, 4][..])
+            );
+        }
+        for site in sites.iter().take(6).skip(2) {
+            assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[0, 0, 0][..]));
+        }
+        assert_eq!(
+            sites
+                .iter()
+                .map(|site| site.samples()[0].evidence().depth())
+                .collect::<Vec<_>>(),
+            [1, 1, 2, 2, 2, 1, 1]
+        );
+    }
+
+    #[test]
+    fn partial_baq_matches_bcftools_1_24_indel_trigger() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        let alignment = directory.path().join("alignment.sam");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        fs::write(
+            &alignment,
+            b"@HD\tVN:1.6\tSO:coordinate\n\
+              @SQ\tSN:MX\tLN:11\n\
+              @RG\tID:rg\tSM:sample\n\
+              r1\t0\tMX\t1\t60\t5M1I6M\t*\t0\t0\tCGTCTCACTACG\tIIIIIIIIIIII\tRG:Z:rg\n\
+              r2\t0\tMX\t1\t60\t5M1I6M\t*\t0\t0\tCGTCTCACTACG\tIIIIIIIIIIII\tRG:Z:rg\n",
+        )
+        .unwrap();
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, alignment, "input")],
+            reference,
+            SampleSelection::default(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_partial_baq(500, false);
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(sites.len(), 11);
+        for site in [&sites[0], &sites[10]] {
+            assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[0, 6, 66][..]));
+        }
+        for site in sites.iter().take(10).skip(1) {
+            assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[0, 6, 73][..]));
+        }
+        assert!(
+            sites
+                .iter()
+                .all(|site| site.samples()[0].evidence().depth() == 2)
         );
     }
 
