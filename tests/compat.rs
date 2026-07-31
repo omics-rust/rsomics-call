@@ -1,8 +1,9 @@
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use noodles::vcf;
+use noodles::sam::alignment::io::Write as _;
+use noodles::{bam, sam, vcf};
 use rsomics_call::{
     AlignmentInput, IndelLikelihoodConfig, LikelihoodSite, LikelihoodVcfSchema, SampleSelection,
     SnpLikelihoodConfig, SnpLikelihoodRun,
@@ -62,6 +63,49 @@ fn write_alignment(
     }
     fs::write(&path, data).unwrap();
     path
+}
+
+fn write_indexed_alignment(
+    directory: &Path,
+    name: &str,
+    sample: &str,
+    reference_length: usize,
+    records: &str,
+) -> PathBuf {
+    let path = directory.join(format!("{name}.bam"));
+    let source = format!(
+        "@HD\tVN:1.6\tSO:coordinate\n\
+         @SQ\tSN:MX\tLN:{reference_length}\n\
+         @RG\tID:rg\tSM:{sample}\n\
+         {records}"
+    );
+    let mut reader = sam::io::Reader::new(source.as_bytes());
+    let header = reader.read_header().unwrap();
+    let records = reader
+        .record_bufs(&header)
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap();
+    let mut writer = bam::io::Writer::new(File::create(&path).unwrap());
+    writer.write_header(&header).unwrap();
+    for record in records {
+        writer.write_alignment_record(&header, &record).unwrap();
+    }
+    writer.try_finish().unwrap();
+    let index = bam::fs::index(&path).unwrap();
+    bam::bai::fs::write(path.with_extension("bai"), &index).unwrap();
+    path
+}
+
+fn decode_likelihoods(output: &[u8]) -> Vec<LikelihoodSite> {
+    let mut reader = vcf::io::Reader::new(output);
+    let header = reader.read_header().unwrap();
+    let schema = LikelihoodVcfSchema::from_header(header.clone()).unwrap();
+    let mut record = vcf::variant::RecordBuf::default();
+    let mut sites = Vec::new();
+    while reader.read_record_buf(&header, &mut record).unwrap() != 0 {
+        sites.push(schema.decode_likelihood(&record).unwrap());
+    }
+    sites
 }
 
 fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
@@ -176,4 +220,61 @@ fn indel_likelihoods_match_bcftools_1_24() {
         rsomics_indel(&repeat_reference, std::slice::from_ref(&repeat_insertion)),
         bcftools_indel(&repeat_reference, &[repeat_insertion])
     );
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn indexed_region_likelihoods_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = write_reference(directory.path(), "ACGTACGTACG");
+    let first = write_indexed_alignment(
+        directory.path(),
+        "first",
+        "S1",
+        11,
+        "first\t0\tMX\t2\t60\t5M\t*\t0\t0\tCGTAC\tIIIII\tRG:Z:rg\n",
+    );
+    let second = write_indexed_alignment(
+        directory.path(),
+        "second",
+        "S2",
+        11,
+        "second\t0\tMX\t6\t60\t3M\t*\t0\t0\tCAT\tIII\tRG:Z:rg\n",
+    );
+    let region = "MX:3-7";
+
+    let output = Command::new(bcftools())
+        .args(["mpileup", "-B", "-f"])
+        .arg(&reference)
+        .args(["-a", "FORMAT/DP,FORMAT/AD,FORMAT/QS", "-r", region, "-Ov"])
+        .args([&first, &second])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = decode_likelihoods(&output.stdout);
+    let run = SnpLikelihoodRun::open_region(
+        [
+            AlignmentInput::new(1, first, "first"),
+            AlignmentInput::new(2, second, "second"),
+        ],
+        reference,
+        SampleSelection::default(),
+        region.parse().unwrap(),
+        PileupOptions::default(),
+        SnpLikelihoodConfig::default(),
+    )
+    .unwrap();
+    let mut actual = Vec::new();
+    run.run(|site| {
+        actual.push(site);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(actual, expected);
 }

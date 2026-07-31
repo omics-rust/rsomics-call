@@ -47,6 +47,9 @@ pub enum CallError {
     #[error("reference dictionary in alignment input {0} differs from the first input")]
     ReferenceDictionaryMismatch(String),
 
+    #[error("invalid alignment region {region}: {message}")]
+    InvalidRegion { region: String, message: String },
+
     #[error("reference input {path}: {message}")]
     ReferenceInput { path: String, message: String },
 

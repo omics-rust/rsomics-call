@@ -13,11 +13,11 @@ use crate::{
     AlignmentInput, AlignmentSet, CallError, CalledSite, CalledVariantWriter, CalledVcfSchema,
     IndelLikelihoodConfig, IndelSiteBuilder, LikelihoodSite, LikelihoodVariantReader, Nucleotide,
     ReferenceSequence, Result, SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder,
-    VariantOutputFormat,
+    VariantOutputFormat, alignment::IndexedAlignmentSet,
 };
 
 pub struct SnpLikelihoodRun {
-    alignments: AlignmentSet,
+    alignments: AlignmentRun,
     reference: ReferenceCache,
     pileup: PileupEngine,
     sites: SnpSiteBuilder,
@@ -38,6 +38,46 @@ enum BaqMode {
     Partial,
 }
 
+enum AlignmentRun {
+    Sequential(AlignmentSet),
+    Region {
+        set: IndexedAlignmentSet,
+        region: Region,
+        filter: RegionFilter,
+    },
+}
+
+impl AlignmentRun {
+    fn reference_sequences(&self) -> &[ReferenceSequence] {
+        match self {
+            Self::Sequential(set) => set.reference_sequences(),
+            Self::Region { set, .. } => set.reference_sequences(),
+        }
+    }
+
+    fn samples(&self) -> &SampleMap {
+        match self {
+            Self::Sequential(set) => set.samples(),
+            Self::Region { set, .. } => set.samples(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RegionFilter {
+    reference_id: usize,
+    start: u64,
+    end: u64,
+}
+
+impl RegionFilter {
+    fn contains(self, site: &LikelihoodSite) -> bool {
+        site.reference_sequence_id() == self.reference_id
+            && site.position() >= self.start
+            && site.position() < self.end
+    }
+}
+
 impl SnpLikelihoodRun {
     pub fn open(
         inputs: impl IntoIterator<Item = AlignmentInput>,
@@ -47,7 +87,40 @@ impl SnpLikelihoodRun {
         likelihood_config: SnpLikelihoodConfig,
     ) -> Result<Self> {
         let reference = reference.as_ref();
-        let alignments = AlignmentSet::open(inputs, Some(reference), selection)?;
+        let alignments =
+            AlignmentRun::Sequential(AlignmentSet::open(inputs, Some(reference), selection)?);
+        Self::from_alignments(alignments, reference, pileup_options, likelihood_config)
+    }
+
+    pub fn open_region(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        reference: impl AsRef<Path>,
+        selection: SampleSelection,
+        region: Region,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        let reference = reference.as_ref();
+        let set = IndexedAlignmentSet::open(inputs, Some(reference), selection)?;
+        let filter = resolve_region(set.reference_sequences(), &region)?;
+        Self::from_alignments(
+            AlignmentRun::Region {
+                set,
+                region,
+                filter,
+            },
+            reference,
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    fn from_alignments(
+        alignments: AlignmentRun,
+        reference: &Path,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
         let lengths = alignments
             .reference_sequences()
             .iter()
@@ -104,28 +177,36 @@ impl SnpLikelihoodRun {
     }
 
     pub fn run(mut self, mut emit: impl FnMut(LikelihoodSite) -> Result<()>) -> Result<()> {
-        while let Some((source_id, record)) = self.alignments.next_record()? {
-            self.pileup.push_with_source(source_id, record)?;
-            drain_sites(
-                &mut self.pileup,
-                &mut self.reference,
-                &mut self.sites,
-                &mut self.indels,
-                self.alignments.samples(),
-                self.baq,
-                &mut emit,
-            )?;
+        let filter = match &self.alignments {
+            AlignmentRun::Sequential(_) => None,
+            AlignmentRun::Region { filter, .. } => Some(*filter),
+        };
+        let mut pipeline = LikelihoodPipeline {
+            pileup: &mut self.pileup,
+            reference: &mut self.reference,
+            sites: &mut self.sites,
+            indels: &mut self.indels,
+            baq: self.baq,
+            filter,
+        };
+        match &mut self.alignments {
+            AlignmentRun::Sequential(alignments) => {
+                while let Some((source_id, record)) = alignments.next_record()? {
+                    pipeline.pileup.push_with_source(source_id, record)?;
+                    drain_sites(&mut pipeline, alignments.samples(), &mut emit)?;
+                }
+                pipeline.pileup.finish()?;
+                drain_sites(&mut pipeline, alignments.samples(), &mut emit)
+            }
+            AlignmentRun::Region { set, region, .. } => {
+                set.visit_region(region, |samples, source_id, record| {
+                    pipeline.pileup.push_with_source(source_id, record)?;
+                    drain_sites(&mut pipeline, samples, &mut emit)
+                })?;
+                pipeline.pileup.finish()?;
+                drain_sites(&mut pipeline, set.samples(), &mut emit)
+            }
         }
-        self.pileup.finish()?;
-        drain_sites(
-            &mut self.pileup,
-            &mut self.reference,
-            &mut self.sites,
-            &mut self.indels,
-            self.alignments.samples(),
-            self.baq,
-            &mut emit,
-        )
     }
 
     pub fn run_called(
@@ -160,19 +241,24 @@ where
     writer.finish()
 }
 
-fn drain_sites(
-    pileup: &mut PileupEngine,
-    reference: &mut ReferenceCache,
-    sites: &mut SnpSiteBuilder,
-    indels: &mut Option<IndelSiteBuilder>,
-    samples: &SampleMap,
+struct LikelihoodPipeline<'a> {
+    pileup: &'a mut PileupEngine,
+    reference: &'a mut ReferenceCache,
+    sites: &'a mut SnpSiteBuilder,
+    indels: &'a mut Option<IndelSiteBuilder>,
     baq: Option<BaqRun>,
+    filter: Option<RegionFilter>,
+}
+
+fn drain_sites(
+    pipeline: &mut LikelihoodPipeline<'_>,
+    samples: &SampleMap,
     emit: &mut impl FnMut(LikelihoodSite) -> Result<()>,
 ) -> Result<()> {
-    pileup.drain_with(|context| {
-        if let Some(baq) = baq {
+    pipeline.pileup.drain_with(|context| {
+        if let Some(baq) = pipeline.baq {
             let mut fetch_reference = |reference_id, range, buffer: &mut Vec<u8>| {
-                buffer.extend_from_slice(reference.sequence(reference_id, range)?);
+                buffer.extend_from_slice(pipeline.reference.sequence(reference_id, range)?);
                 Ok::<_, CallError>(())
             };
             match baq.mode {
@@ -189,15 +275,22 @@ fn drain_sites(
             }
         }
         let column = context.column();
-        let reference_base = reference.base(column.reference_id(), column.position())?;
-        let site = sites.build(&column, reference_base, |source_id, record| {
-            samples.sample_index(source_id, record)
-        })?;
-        emit(site)?;
-        if let Some(indels) = indels {
-            let reference_length = reference.length(column.reference_id())?;
+        let reference_base = pipeline
+            .reference
+            .base(column.reference_id(), column.position())?;
+        let site = pipeline
+            .sites
+            .build(&column, reference_base, |source_id, record| {
+                samples.sample_index(source_id, record)
+            })?;
+        if pipeline.filter.is_none_or(|filter| filter.contains(&site)) {
+            emit(site)?;
+        }
+        if let Some(indels) = pipeline.indels {
+            let reference_length = pipeline.reference.length(column.reference_id())?;
             let mut fetch_reference = |range, buffer: &mut Vec<u8>| {
-                buffer.extend_from_slice(reference.sequence(column.reference_id(), range)?);
+                buffer
+                    .extend_from_slice(pipeline.reference.sequence(column.reference_id(), range)?);
                 Ok::<_, CallError>(())
             };
             if let Some(site) = indels.build(
@@ -205,11 +298,44 @@ fn drain_sites(
                 reference_length,
                 |source_id, record| samples.sample_index(source_id, record),
                 &mut fetch_reference,
-            )? {
+            )? && pipeline.filter.is_none_or(|filter| filter.contains(&site))
+            {
                 emit(site)?;
             }
         }
         Ok(())
+    })
+}
+
+fn resolve_region(references: &[ReferenceSequence], region: &Region) -> Result<RegionFilter> {
+    let reference_id = references
+        .iter()
+        .position(|reference| reference.name() == region.name())
+        .ok_or_else(|| CallError::InvalidRegion {
+            region: region.to_string(),
+            message: "reference sequence is absent from the alignment header".to_owned(),
+        })?;
+    let length = references[reference_id].length();
+    let interval = region.interval();
+    let start = interval
+        .start()
+        .map(|position| u64::try_from(usize::from(position) - 1).unwrap())
+        .unwrap_or(0);
+    let end = interval
+        .end()
+        .map(|position| u64::try_from(usize::from(position)).unwrap())
+        .unwrap_or(length)
+        .min(length);
+    if start >= end {
+        return Err(CallError::InvalidRegion {
+            region: region.to_string(),
+            message: "interval is outside the reference sequence".to_owned(),
+        });
+    }
+    Ok(RegionFilter {
+        reference_id,
+        start,
+        end,
     })
 }
 
@@ -337,7 +463,8 @@ mod tests {
     use std::fs;
     use std::io::Write;
 
-    use noodles::vcf;
+    use noodles::sam::alignment::io::Write as _;
+    use noodles::{bam, sam, vcf};
     use noodles_util::variant;
     use tempfile::NamedTempFile;
 
@@ -377,6 +504,39 @@ mod tests {
             .unwrap();
         }
         file
+    }
+
+    fn indexed_bam_file(
+        directory: &Path,
+        name: &str,
+        sample: &str,
+        position: usize,
+        cigar: &str,
+        sequence: &str,
+    ) -> PathBuf {
+        let input = directory.join(format!("{name}.bam"));
+        let qualities = "I".repeat(sequence.len());
+        let source = format!(
+            "@HD\tVN:1.6\tSO:coordinate\n\
+             @SQ\tSN:chr1\tLN:20\n\
+             @RG\tID:rg\tSM:{sample}\n\
+             {name}\t0\tchr1\t{position}\t60\t{cigar}\t*\t0\t0\t{sequence}\t{qualities}\tRG:Z:rg\n"
+        );
+        let mut reader = sam::io::Reader::new(source.as_bytes());
+        let header = reader.read_header().unwrap();
+        let records = reader
+            .record_bufs(&header)
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        let mut writer = bam::io::Writer::new(File::create(&input).unwrap());
+        writer.write_header(&header).unwrap();
+        for record in records {
+            writer.write_alignment_record(&header, &record).unwrap();
+        }
+        writer.try_finish().unwrap();
+        let index = bam::fs::index(&input).unwrap();
+        bam::bai::fs::write(input.with_extension("bai"), &index).unwrap();
+        input
     }
 
     fn indel_sam_file(sample: &str, cigar: &str, sequence: &str) -> NamedTempFile {
@@ -444,6 +604,55 @@ mod tests {
             assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[0, 3, 40][..]));
             assert_eq!(site.samples()[0].evidence().depth(), 1);
         }
+    }
+
+    #[test]
+    fn indexed_region_merges_sources_and_clips_emitted_sites() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">chr1\nAAAAAAAAAAAAAAAAAAAA\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"chr1\t20\t6\t20\t21\n").unwrap();
+        let first = indexed_bam_file(directory.path(), "first", "S1", 4, "3M", "AAA");
+        let second = indexed_bam_file(directory.path(), "second", "S2", 6, "1M", "G");
+        let run = SnpLikelihoodRun::open_region(
+            [
+                AlignmentInput::new(1, first, "first"),
+                AlignmentInput::new(2, second, "second"),
+            ],
+            reference,
+            SampleSelection::default(),
+            "chr1:5-6".parse().unwrap(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap();
+
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            sites
+                .iter()
+                .map(LikelihoodSite::position)
+                .collect::<Vec<_>>(),
+            [4, 5]
+        );
+        assert_eq!(
+            sites
+                .iter()
+                .map(|site| {
+                    site.samples()
+                        .iter()
+                        .map(|sample| sample.evidence().depth())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            [vec![1, 0], vec![1, 1]]
+        );
     }
 
     #[test]

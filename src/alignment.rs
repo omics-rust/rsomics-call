@@ -4,10 +4,12 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use noodles::sam::alignment::RecordBuf;
+use noodles::core::Region;
+use noodles::sam::alignment::{Record, RecordBuf};
 use noodles::sam::header::record::value::map::read_group::tag;
 use noodles::{bam, bgzf, cram, fasta, sam};
 use rsomics_bamio::raw::{self, RawRecord, RawRecordEncoder};
+use rsomics_bamio::{IndexedAlignmentReader, open_indexed_alignment};
 
 use crate::{CallError, Result, SampleMap, SampleMapBuilder, SampleSelection};
 
@@ -78,43 +80,16 @@ impl AlignmentSet {
     ) -> Result<Self> {
         let repository = reference.map(reference_repository).transpose()?;
         let mut readers = Vec::new();
-        let mut references = None;
-        let mut samples = SampleMapBuilder::new(selection);
+        let mut metadata = AlignmentMetadataBuilder::new(selection);
 
         for input in inputs {
             let reader = SourceReader::open(input, repository.clone())?;
-            let current_references = reference_sequences(&reader.header);
-            if let Some(expected) = &references {
-                if expected != &current_references {
-                    return Err(CallError::ReferenceDictionaryMismatch(
-                        reader.path.display().to_string(),
-                    ));
-                }
-            } else {
-                references = Some(current_references);
-            }
-
-            let read_groups = reader
-                .header
-                .read_groups()
-                .iter()
-                .filter_map(|(id, group)| {
-                    group
-                        .other_fields()
-                        .get(&tag::SAMPLE)
-                        .map(|sample| (id, sample))
-                })
-                .map(|(id, sample)| {
-                    let sample = std::str::from_utf8(sample.as_ref())
-                        .map_err(|error| input_error(&reader.path, error))?;
-                    Ok((id.to_vec(), sample.to_owned()))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            samples.add_source(
+            metadata.add_source(
                 reader.source_id,
+                &reader.path,
+                &reader.header,
                 reader.sample_name.clone(),
                 reader.ignore_read_groups,
-                read_groups,
             )?;
             readers.push(reader);
         }
@@ -122,12 +97,13 @@ impl AlignmentSet {
         if readers.is_empty() {
             return Err(CallError::MissingAlignmentInputs);
         }
+        let (references, samples) = metadata.finish()?;
 
         let mut set = Self {
             readers,
             pending: BinaryHeap::new(),
-            references: references.unwrap().into_boxed_slice(),
-            samples: samples.finish()?,
+            references,
+            samples,
         };
         for source_index in 0..set.readers.len() {
             set.fill_source(source_index)?;
@@ -157,6 +133,197 @@ impl AlignmentSet {
             self.pending.push(PendingRecord::new(source_index, record));
         }
         Ok(())
+    }
+}
+
+pub(crate) struct IndexedAlignmentSet {
+    readers: Vec<IndexedSourceReader>,
+    references: Box<[ReferenceSequence]>,
+    samples: SampleMap,
+}
+
+impl IndexedAlignmentSet {
+    pub(crate) fn open(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        reference: Option<&Path>,
+        selection: SampleSelection,
+    ) -> Result<Self> {
+        let mut readers = Vec::new();
+        let mut metadata = AlignmentMetadataBuilder::new(selection);
+
+        for input in inputs {
+            let mut reader = open_indexed_alignment(&input.path, reference)
+                .map_err(|error| input_error(&input.path, error))?;
+            let header = reader
+                .read_header()
+                .map_err(|error| input_error(&input.path, error))?;
+            metadata.add_source(
+                input.source_id,
+                &input.path,
+                &header,
+                input.sample_name.clone(),
+                input.ignore_read_groups,
+            )?;
+            readers.push(IndexedSourceReader {
+                source_id: input.source_id,
+                path: input.path,
+                header,
+                reader,
+            });
+        }
+
+        if readers.is_empty() {
+            return Err(CallError::MissingAlignmentInputs);
+        }
+        let (references, samples) = metadata.finish()?;
+        Ok(Self {
+            readers,
+            references,
+            samples,
+        })
+    }
+
+    pub(crate) fn reference_sequences(&self) -> &[ReferenceSequence] {
+        &self.references
+    }
+
+    pub(crate) fn samples(&self) -> &SampleMap {
+        &self.samples
+    }
+
+    pub(crate) fn visit_region(
+        &mut self,
+        region: &Region,
+        mut visit: impl FnMut(&SampleMap, u32, RawRecord) -> Result<()>,
+    ) -> Result<()> {
+        let samples = &self.samples;
+        let mut readers = self
+            .readers
+            .iter_mut()
+            .map(|source| RegionSourceReader::new(source, region))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pending = BinaryHeap::new();
+        for source_index in 0..readers.len() {
+            fill_region_source(&mut readers, &mut pending, source_index)?;
+        }
+        while let Some(record) = pending.pop() {
+            let source_id = readers[record.source_index].source_id;
+            fill_region_source(&mut readers, &mut pending, record.source_index)?;
+            visit(samples, source_id, record.record)?;
+        }
+        Ok(())
+    }
+}
+
+struct IndexedSourceReader {
+    source_id: u32,
+    path: PathBuf,
+    header: sam::Header,
+    reader: IndexedAlignmentReader,
+}
+
+struct RegionSourceReader<'a> {
+    source_id: u32,
+    path: &'a Path,
+    header: &'a sam::Header,
+    records: Box<dyn Iterator<Item = io::Result<Box<dyn Record>>> + 'a>,
+    encoder: RawRecordEncoder,
+}
+
+impl<'a> RegionSourceReader<'a> {
+    fn new(source: &'a mut IndexedSourceReader, region: &Region) -> Result<Self> {
+        let records = source
+            .reader
+            .query(&source.header, region)
+            .map_err(|error| input_error(&source.path, error))?;
+        Ok(Self {
+            source_id: source.source_id,
+            path: &source.path,
+            header: &source.header,
+            records: Box::new(records),
+            encoder: RawRecordEncoder::default(),
+        })
+    }
+
+    fn next_record(&mut self) -> Result<Option<RawRecord>> {
+        let Some(record) = self.records.next() else {
+            return Ok(None);
+        };
+        let record = record.map_err(|error| input_error(self.path, error))?;
+        self.encoder
+            .encode(self.header, record.as_ref())
+            .map(Some)
+            .map_err(|error| input_error(self.path, error))
+    }
+}
+
+fn fill_region_source(
+    readers: &mut [RegionSourceReader<'_>],
+    pending: &mut BinaryHeap<PendingRecord>,
+    source_index: usize,
+) -> Result<()> {
+    if let Some(record) = readers[source_index].next_record()? {
+        pending.push(PendingRecord::new(source_index, record));
+    }
+    Ok(())
+}
+
+struct AlignmentMetadataBuilder {
+    references: Option<Vec<ReferenceSequence>>,
+    samples: SampleMapBuilder,
+}
+
+impl AlignmentMetadataBuilder {
+    fn new(selection: SampleSelection) -> Self {
+        Self {
+            references: None,
+            samples: SampleMapBuilder::new(selection),
+        }
+    }
+
+    fn add_source(
+        &mut self,
+        source_id: u32,
+        path: &Path,
+        header: &sam::Header,
+        sample_name: Box<str>,
+        ignore_read_groups: bool,
+    ) -> Result<()> {
+        let current_references = reference_sequences(header);
+        if let Some(expected) = &self.references {
+            if expected != &current_references {
+                return Err(CallError::ReferenceDictionaryMismatch(
+                    path.display().to_string(),
+                ));
+            }
+        } else {
+            self.references = Some(current_references);
+        }
+
+        let read_groups = header
+            .read_groups()
+            .iter()
+            .filter_map(|(id, group)| {
+                group
+                    .other_fields()
+                    .get(&tag::SAMPLE)
+                    .map(|sample| (id, sample))
+            })
+            .map(|(id, sample)| {
+                let sample = std::str::from_utf8(sample.as_ref())
+                    .map_err(|error| input_error(path, error))?;
+                Ok((id.to_vec(), sample.to_owned()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.samples
+            .add_source(source_id, sample_name, ignore_read_groups, read_groups)
+    }
+
+    fn finish(self) -> Result<(Box<[ReferenceSequence]>, SampleMap)> {
+        Ok((
+            self.references.unwrap().into_boxed_slice(),
+            self.samples.finish()?,
+        ))
     }
 }
 

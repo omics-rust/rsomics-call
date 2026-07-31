@@ -18,8 +18,8 @@ doctest = false
 [dependencies]
 noodles = { version = "0.110", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "vcf"] }
 noodles-util = { version = "0.79", features = ["variant"] }
-rsomics-bamio = "0.2"
-rsomics-pileup = "0.2"
+rsomics-bamio = "0.3"
+rsomics-pileup = "0.3"
 thiserror = "2"
 
 [dev-dependencies]
