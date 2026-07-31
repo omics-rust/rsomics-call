@@ -8,8 +8,8 @@ use noodles::{
 use rsomics_pileup::{PileupEngine, PileupOptions};
 
 use crate::{
-    AlignmentInput, AlignmentSet, CallError, LikelihoodSite, Nucleotide, ReferenceSequence, Result,
-    SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder,
+    AlignmentInput, AlignmentSet, CallError, CalledSite, LikelihoodSite, Nucleotide,
+    ReferenceSequence, Result, SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder,
 };
 
 pub struct SnpLikelihoodRun {
@@ -71,6 +71,14 @@ impl SnpLikelihoodRun {
             self.alignments.samples(),
             &mut emit,
         )
+    }
+
+    pub fn run_called(
+        self,
+        mut call: impl FnMut(&LikelihoodSite) -> Result<CalledSite>,
+        mut emit: impl FnMut(CalledSite) -> Result<()>,
+    ) -> Result<()> {
+        self.run(|site| emit(call(&site)?))
     }
 }
 
@@ -309,6 +317,52 @@ mod tests {
             site.samples()[1].phred_likelihoods(),
             Some(&[40, 3, 0, 40, 3, 40][..])
         );
+    }
+
+    #[test]
+    fn fused_call_matches_materialized_typed_pipeline() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+        let reference = fixtures.join("alignment-reference.fa");
+        let first = sam_file("S1", 'A');
+        let second = sam_file("S2", 'G');
+        let open = || {
+            SnpLikelihoodRun::open(
+                [
+                    AlignmentInput::new(1, first.path(), "first"),
+                    AlignmentInput::new(2, second.path(), "second"),
+                ],
+                &reference,
+                SampleSelection::default(),
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            )
+            .unwrap()
+        };
+        let caller = crate::MultiallelicCaller::default();
+        let mut materialized = Vec::new();
+        open()
+            .run(|site| {
+                materialized.push(site);
+                Ok(())
+            })
+            .unwrap();
+        let expected = materialized
+            .iter()
+            .map(|site| caller.call(site).unwrap())
+            .collect::<Vec<_>>();
+        let mut fused = Vec::new();
+
+        open()
+            .run_called(
+                |site| caller.call(site),
+                |site| {
+                    fused.push(site);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(fused, expected);
     }
 
     #[test]
