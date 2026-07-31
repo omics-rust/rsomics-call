@@ -38,6 +38,15 @@ pub enum CallError {
     #[error("alignment source ID {0} is unknown")]
     UnknownAlignmentSource(u32),
 
+    #[error("at least one alignment input is required")]
+    MissingAlignmentInputs,
+
+    #[error("alignment input {path}: {message}")]
+    AlignmentInput { path: String, message: String },
+
+    #[error("reference dictionary in alignment input {0} differs from the first input")]
+    ReferenceDictionaryMismatch(String),
+
     #[error("invalid or duplicate read-group ID: {0}")]
     InvalidReadGroup(String),
 
