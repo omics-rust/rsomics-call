@@ -200,7 +200,7 @@ impl MultiallelicCaller {
             .iter()
             .position(|allele| matches!(allele.as_bytes(), b"<*>" | b"<NON_REF>"))
             .map(|index| index + 1);
-        let mut retained = selection.alleles;
+        let mut retained = selection.alleles.clone();
         retained[0] = true;
         if let Some(index) = unseen {
             retained[index] = false;
@@ -226,15 +226,15 @@ impl MultiallelicCaller {
                     &mut allele_counts,
                 )?);
             } else {
-                samples.push(call_sample(
-                    sample,
-                    &likelihoods[sample_index],
-                    &quality_sums,
-                    &retained,
-                    &old_to_new,
+                let context = SampleCallContext {
+                    likelihoods: &likelihoods[sample_index],
+                    quality_sums: &quality_sums,
+                    retained: &retained,
+                    allowed: &selection.alleles,
+                    old_to_new: &old_to_new,
                     ploidy,
-                    &mut allele_counts,
-                )?);
+                };
+                samples.push(call_sample(sample, context, &mut allele_counts)?);
             }
         }
 
@@ -496,19 +496,25 @@ fn update_selection(
     }
 }
 
+struct SampleCallContext<'a> {
+    likelihoods: &'a [f64],
+    quality_sums: &'a [f64],
+    retained: &'a [usize],
+    allowed: &'a [bool],
+    old_to_new: &'a [Option<usize>],
+    ploidy: CallPloidy,
+}
+
 fn call_sample(
     sample: &SampleLikelihood,
-    likelihoods: &[f64],
-    quality_sums: &[f64],
-    retained: &[usize],
-    old_to_new: &[Option<usize>],
-    ploidy: CallPloidy,
+    context: SampleCallContext<'_>,
     allele_counts: &mut [u32],
 ) -> Result<CalledSample> {
-    let (phred_likelihoods, evidence) = trimmed_fields(sample, retained, ploidy, true)?;
-    if likelihoods.iter().all(|&value| value == 0.0) {
+    let (phred_likelihoods, evidence) =
+        trimmed_fields(sample, context.retained, context.ploidy, true)?;
+    if context.likelihoods.iter().all(|&value| value == 0.0) {
         return Ok(CalledSample {
-            ploidy,
+            ploidy: context.ploidy,
             genotype: None,
             genotype_quality: 0,
             genotype_probabilities: None,
@@ -517,22 +523,25 @@ fn call_sample(
         });
     }
 
-    let genotype_count = if ploidy == CallPloidy::Diploid {
-        retained.len() * (retained.len() + 1) / 2
+    let genotype_count = if context.ploidy == CallPloidy::Diploid {
+        context.retained.len() * (context.retained.len() + 1) / 2
     } else {
-        retained.len()
+        context.retained.len()
     };
     let mut probabilities = vec![0.0f32; genotype_count];
     let mut best = 0.0;
-    let mut genotype = vec![0usize; ploidy.chromosome_count()];
-    for &right in retained {
-        let new_right = old_to_new[right].unwrap();
-        let homozygous = if ploidy == CallPloidy::Diploid {
-            likelihoods[genotype_index(right, right)] * quality_sums[right].powi(2)
+    let mut genotype = vec![0usize; context.ploidy.chromosome_count()];
+    for &right in context.retained {
+        if !context.allowed[right] {
+            continue;
+        }
+        let new_right = context.old_to_new[right].unwrap();
+        let homozygous = if context.ploidy == CallPloidy::Diploid {
+            context.likelihoods[genotype_index(right, right)] * context.quality_sums[right].powi(2)
         } else {
-            likelihoods[genotype_index(right, right)] * quality_sums[right]
+            context.likelihoods[genotype_index(right, right)] * context.quality_sums[right]
         };
-        let output_index = if ploidy == CallPloidy::Diploid {
+        let output_index = if context.ploidy == CallPloidy::Diploid {
             genotype_index(new_right, new_right)
         } else {
             new_right
@@ -542,13 +551,18 @@ fn call_sample(
             best = homozygous;
             genotype.fill(new_right);
         }
-        if ploidy == CallPloidy::Diploid {
-            for &left in retained.iter().take_while(|&&left| left != right) {
-                let new_left = old_to_new[left].unwrap();
+        if context.ploidy == CallPloidy::Diploid {
+            for &left in context
+                .retained
+                .iter()
+                .take_while(|&&left| left != right)
+                .filter(|&&left| context.allowed[left])
+            {
+                let new_left = context.old_to_new[left].unwrap();
                 let heterozygous = 2.0
-                    * likelihoods[genotype_index(right, left)]
-                    * quality_sums[right]
-                    * quality_sums[left];
+                    * context.likelihoods[genotype_index(right, left)]
+                    * context.quality_sums[right]
+                    * context.quality_sums[left];
                 probabilities[genotype_index(new_right, new_left)] = heterozygous as f32;
                 if best < heterozygous {
                     best = heterozygous;
@@ -590,7 +604,7 @@ fn call_sample(
             .into_boxed_slice()
     });
     Ok(CalledSample {
-        ploidy,
+        ploidy: context.ploidy,
         genotype: Some(genotype.into()),
         genotype_quality: quality,
         genotype_probabilities: probabilities,
@@ -924,6 +938,33 @@ mod tests {
         assert_eq!(
             called.samples()[1].phred_likelihoods(),
             Some(&[40, 3, 0][..])
+        );
+    }
+
+    #[test]
+    fn matches_bcftools_1_24_alt_only_selection() {
+        let site = LikelihoodSite::new(
+            0,
+            0,
+            Allele::new(&b"A"[..]).unwrap(),
+            [
+                Allele::new(&b"G"[..]).unwrap(),
+                Allele::new(&b"<*>"[..]).unwrap(),
+            ],
+            [0.0, 1.0, 0.0],
+            [sample([40, 3, 0, 40, 3, 40], [0, 1, 0], [0, 40, 0])],
+        )
+        .unwrap();
+
+        let called = MultiallelicCaller::default().call(&site).unwrap();
+
+        assert_eq!(called.allele_counts(), &[0, 2]);
+        assert!((called.quality().unwrap() - 10.7923).abs() < 1e-4);
+        assert_eq!(called.samples()[0].genotype(), Some(&[1, 1][..]));
+        assert_eq!(called.samples()[0].genotype_quality(), 127);
+        assert_eq!(
+            called.samples()[0].genotype_probabilities(),
+            Some(&[0.0, 0.0, 1.0][..])
         );
     }
 
