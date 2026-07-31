@@ -85,6 +85,9 @@ pub enum CallError {
 
     #[error("called allele count exceeds the supported range")]
     CalledAlleleCountOverflow,
+
+    #[error("invalid likelihood VCF/BCF: {0}")]
+    InvalidLikelihoodVariant(String),
 }
 
 pub type Result<T> = std::result::Result<T, CallError>;

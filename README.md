@@ -16,12 +16,13 @@ The current code establishes coordinate-merged SAM/BAM/CRAM input, multi-input
 sample projection, bounded reference caching, and a streaming SNP likelihood
 path with per-input depth limits, deterministic deep-sample selection, and
 allele-aligned site and sample quality evidence. The current slice is checked
-against bcftools and HTSlib 1.24 and includes the single-group zero-copy,
-haploid, and diploid multiallelic caller core. It does not yet expose a
-command-line binary.
+against bcftools and HTSlib 1.24 and includes zero-copy, haploid, diploid, and
+independently grouped multiallelic calls, a fused typed calling path, and
+strict likelihood-record conversion for text VCF and BCF. It does not yet
+expose a command-line binary.
 Incomplete commands stay absent until SNP/indel and BAQ likelihoods, complete
-consensus and multiallelic policies, VCF/BCF, oracle, and performance gates
-pass.
+consensus and multiallelic policies, complete VCF/BCF streams, oracle, and
+performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
