@@ -1,15 +1,13 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
-use std::io::{BufReader, Read};
-use std::mem;
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use noodles::sam::alignment::RecordBuf;
-use noodles::sam::alignment::io::Write as _;
 use noodles::sam::header::record::value::map::read_group::tag;
 use noodles::{bam, bgzf, cram, fasta, sam};
-use rsomics_bamio::raw::{self, RawRecord};
+use rsomics_bamio::raw::{self, RawRecord, RawRecordEncoder};
 
 use crate::{CallError, Result, SampleMap, SampleMapBuilder, SampleSelection};
 
@@ -179,12 +177,12 @@ impl SourceReader {
             (Format::Sam, Compression::None) => SourceInner::Sam {
                 reader: sam::io::Reader::new(BufReader::new(file)),
                 record: RecordBuf::default(),
-                encoder: RecordEncoder::default(),
+                encoder: RawRecordEncoder::default(),
             },
             (Format::Sam, Compression::Bgzf) => SourceInner::SamGz {
                 reader: sam::io::Reader::new(bgzf::io::Reader::new(BufReader::new(file))),
                 record: RecordBuf::default(),
-                encoder: RecordEncoder::default(),
+                encoder: RawRecordEncoder::default(),
             },
             (Format::Bam, Compression::None) => {
                 SourceInner::BamRaw(bam::io::Reader::from(BufReader::new(file)))
@@ -202,7 +200,7 @@ impl SourceReader {
                     repository,
                     container: cram::io::reader::Container::default(),
                     records: VecDeque::new(),
-                    encoder: RecordEncoder::default(),
+                    encoder: RawRecordEncoder::default(),
                 }
             }
             (Format::Cram, Compression::Bgzf) => unreachable!(),
@@ -232,12 +230,12 @@ enum SourceInner {
     Sam {
         reader: sam::io::Reader<BufReader<File>>,
         record: RecordBuf,
-        encoder: RecordEncoder,
+        encoder: RawRecordEncoder,
     },
     SamGz {
         reader: sam::io::Reader<bgzf::io::Reader<BufReader<File>>>,
         record: RecordBuf,
-        encoder: RecordEncoder,
+        encoder: RawRecordEncoder,
     },
     Bam(bam::io::Reader<bgzf::io::Reader<BufReader<File>>>),
     BamRaw(bam::io::Reader<BufReader<File>>),
@@ -246,7 +244,7 @@ enum SourceInner {
         repository: fasta::Repository,
         container: cram::io::reader::Container,
         records: VecDeque<RecordBuf>,
-        encoder: RecordEncoder,
+        encoder: RawRecordEncoder,
     },
 }
 
@@ -271,7 +269,7 @@ impl SourceInner {
                 if reader.read_record_buf(header, record)? == 0 {
                     Ok(None)
                 } else {
-                    encoder.encode(header, record).map(Some)
+                    encode_record(encoder, header, record).map(Some)
                 }
             }
             Self::SamGz {
@@ -282,7 +280,7 @@ impl SourceInner {
                 if reader.read_record_buf(header, record)? == 0 {
                     Ok(None)
                 } else {
-                    encoder.encode(header, record).map(Some)
+                    encode_record(encoder, header, record).map(Some)
                 }
             }
             Self::Bam(reader) => read_bam_record(reader.get_mut()),
@@ -315,52 +313,20 @@ impl SourceInner {
                         }
                     }
                 }
-                encoder
-                    .encode(header, &records.pop_front().unwrap())
-                    .map(Some)
+                encode_record(encoder, header, &records.pop_front().unwrap()).map(Some)
             }
         }
     }
 }
 
-struct RecordEncoder {
-    writer: bam::io::Writer<Vec<u8>>,
-}
-
-impl Default for RecordEncoder {
-    fn default() -> Self {
-        Self {
-            writer: bam::io::Writer::from(Vec::new()),
-        }
-    }
-}
-
-impl RecordEncoder {
-    fn encode(
-        &mut self,
-        header: &sam::Header,
-        record: &dyn sam::alignment::Record,
-    ) -> std::io::Result<RawRecord> {
-        self.writer.get_mut().clear();
-        self.writer.write_alignment_record(header, record)?;
-        let mut framed = mem::take(self.writer.get_mut());
-        if framed.len() < 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "BAM encoder omitted the record size",
-            ));
-        }
-        let expected = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
-        if expected != framed.len() - 4 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "BAM encoder produced an inconsistent record size",
-            ));
-        }
-        framed.drain(..4);
-        RawRecord::try_from(framed)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    }
+fn encode_record(
+    encoder: &mut RawRecordEncoder,
+    header: &sam::Header,
+    record: &dyn sam::alignment::Record,
+) -> io::Result<RawRecord> {
+    encoder
+        .encode(header, record)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 struct PendingRecord {
@@ -487,6 +453,7 @@ fn input_error(path: &Path, error: impl std::fmt::Display) -> CallError {
 mod tests {
     use std::io::Write;
 
+    use noodles::sam::alignment::io::Write as _;
     use tempfile::NamedTempFile;
 
     use super::*;
