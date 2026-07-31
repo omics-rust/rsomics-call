@@ -65,6 +65,21 @@ pub enum CallError {
     #[error("SNP evidence exceeds the supported count range")]
     SnpEvidenceOverflow,
 
+    #[error("invalid indel likelihood configuration")]
+    InvalidIndelConfig,
+
+    #[error("invalid indel site summary")]
+    InvalidIndelSummary,
+
+    #[error("indel evidence exceeds the supported count range")]
+    IndelEvidenceOverflow,
+
+    #[error("reference data required for indel likelihoods is invalid")]
+    InvalidIndelReference,
+
+    #[error("indel realignment failed")]
+    IndelRealignment,
+
     #[error("multiallelic mutation rate must be finite and between zero and one")]
     InvalidMutationRate,
 

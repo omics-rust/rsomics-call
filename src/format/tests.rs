@@ -153,9 +153,67 @@ fn builds_a_checked_likelihood_header() {
     assert_eq!(schema.header().contigs().len(), 1);
     assert_eq!(schema.header().sample_names().len(), 2);
     assert!(schema.header().infos().contains_key(QUALITY_SUM));
+    assert!(schema.header().infos().contains_key(INDEL));
+    assert!(schema.header().infos().contains_key(IDV));
+    assert!(schema.header().infos().contains_key(IMF));
     assert!(schema.header().formats().contains_key(PL));
     assert!(schema.header().formats().contains_key(DP));
     assert!(schema.header().formats().contains_key(AD));
+}
+
+#[test]
+fn preserves_indel_summary_in_likelihood_and_called_records() {
+    let schema = LikelihoodVcfSchema::new([(b"MX".as_slice(), 11)], ["sample"]).unwrap();
+    let site = LikelihoodSite::new(
+        0,
+        4,
+        Allele::new(&b"T"[..]).unwrap(),
+        [Allele::new(&b"TC"[..]).unwrap()],
+        [0.0, 1.0],
+        [SampleLikelihood::observed(
+            Ploidy::new(2).unwrap(),
+            [56, 6, 0],
+            SampleEvidence::new(2, [0, 2], [0, 62]).unwrap(),
+        )
+        .unwrap()],
+    )
+    .unwrap()
+    .with_indel_summary(IndelSummary::new(2, 1.0).unwrap());
+
+    let record = schema.encode_likelihood(&site).unwrap();
+    assert_eq!(record.info().get(INDEL), Some(Some(&InfoValue::Flag)));
+    assert_eq!(record.info().get(IDV), Some(Some(&InfoValue::Integer(2))));
+    assert_eq!(record.info().get(IMF), Some(Some(&InfoValue::Float(1.0))));
+    assert_eq!(schema.decode_likelihood(&record).unwrap(), site);
+
+    let mut data = Vec::new();
+    let mut writer = noodles::bcf::io::Writer::from(&mut data);
+    writer.write_header(schema.header()).unwrap();
+    writer
+        .write_variant_record(schema.header(), &record)
+        .unwrap();
+    let mut reader = noodles::bcf::io::Reader::from(&data[..]);
+    let header = reader.read_header().unwrap();
+    let decoded_schema = LikelihoodVcfSchema::from_header(header.clone()).unwrap();
+    let mut decoded = vcf::variant::RecordBuf::default();
+    reader.read_record_buf(&header, &mut decoded).unwrap();
+    assert_eq!(decoded_schema.decode_likelihood(&decoded).unwrap(), site);
+
+    let called = crate::MultiallelicCaller::default().call(&site).unwrap();
+    let called_schema = CalledVcfSchema::from_likelihood(&schema);
+    let called_record = called_schema.encode_call(&called).unwrap();
+    assert_eq!(
+        called_record.info().get(INDEL),
+        Some(Some(&InfoValue::Flag))
+    );
+    assert_eq!(
+        called_record.info().get(IDV),
+        Some(Some(&InfoValue::Integer(2)))
+    );
+    assert_eq!(
+        called_record.info().get(IMF),
+        Some(Some(&InfoValue::Float(1.0)))
+    );
 }
 
 #[test]

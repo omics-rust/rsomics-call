@@ -26,10 +26,14 @@ use noodles::{
 };
 
 use crate::{
-    Allele, CallError, CalledSite, LikelihoodSite, Ploidy, Result, SampleEvidence, SampleLikelihood,
+    Allele, CallError, CalledSite, IndelSummary, LikelihoodSite, Ploidy, Result, SampleEvidence,
+    SampleLikelihood,
 };
 
 const QUALITY_SUM: &str = "QS";
+const INDEL: &str = "INDEL";
+const IDV: &str = "IDV";
+const IMF: &str = "IMF";
 const PL: &str = "PL";
 const DP: &str = "DP";
 const AD: &str = "AD";
@@ -66,6 +70,30 @@ impl LikelihoodVcfSchema {
                     InfoNumber::ReferenceAlternateBases,
                     InfoType::Float,
                     "Auxiliary tag used for calling",
+                ),
+            )
+            .add_info(
+                INDEL,
+                Map::<Info>::new(
+                    InfoNumber::Count(0),
+                    InfoType::Flag,
+                    "Indicates that the variant is an INDEL",
+                ),
+            )
+            .add_info(
+                IDV,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Integer,
+                    "Maximum number of raw reads supporting an indel",
+                ),
+            )
+            .add_info(
+                IMF,
+                Map::<Info>::new(
+                    InfoNumber::Count(1),
+                    InfoType::Float,
+                    "Maximum fraction of raw reads supporting an indel",
                 ),
             )
             .add_format(
@@ -142,6 +170,9 @@ impl LikelihoodVcfSchema {
             InfoNumber::ReferenceAlternateBases,
             InfoType::Float,
         )?;
+        require_optional_info(&header, INDEL, InfoNumber::Count(0), InfoType::Flag)?;
+        require_optional_info(&header, IDV, InfoNumber::Count(1), InfoType::Integer)?;
+        require_optional_info(&header, IMF, InfoNumber::Count(1), InfoType::Float)?;
         require_format(
             &header,
             PL,
@@ -198,7 +229,7 @@ impl LikelihoodVcfSchema {
                 .map(|allele| allele_text(allele).map(str::to_owned))
                 .collect::<Result<Vec<_>>>()?,
         );
-        let info = RecordInfo::from_iter([(
+        let mut info = RecordInfo::from_iter([(
             QUALITY_SUM.to_owned(),
             Some(InfoValue::Array(InfoArray::Float(
                 site.allele_quality_sums()
@@ -208,6 +239,7 @@ impl LikelihoodVcfSchema {
                     .collect(),
             ))),
         )]);
+        insert_indel_info(&self.header, &mut info, site.indel_summary())?;
         let keys = Keys::from_iter([
             PL.to_owned(),
             DP.to_owned(),
@@ -275,14 +307,18 @@ impl LikelihoodVcfSchema {
         let samples = (0..self.header.sample_names().len())
             .map(|index| decode_sample(record.samples(), index, allele_count))
             .collect::<Result<Vec<_>>>()?;
-        LikelihoodSite::new(
+        let site = LikelihoodSite::new(
             reference_sequence_id,
             position,
             reference,
             alternates,
             allele_quality_sums,
             samples,
-        )
+        )?;
+        match decode_indel_summary(record)? {
+            Some(summary) => Ok(site.with_indel_summary(summary)),
+            None => Ok(site),
+        }
     }
 }
 
@@ -386,6 +422,7 @@ impl CalledVcfSchema {
                     .map_err(|_| invalid("INFO/AN exceeds the VCF integer range"))?,
             )),
         );
+        insert_indel_info(&self.header, &mut info, site.indel_summary())?;
         let include_dp = self.header.formats().contains_key(DP);
         let include_ad = self.header.formats().contains_key(AD);
         let include_qs = self.header.formats().contains_key(QUALITY_SUM);
@@ -485,6 +522,71 @@ fn require_info(header: &vcf::Header, key: &str, number: InfoNumber, ty: InfoTyp
         )));
     }
     Ok(())
+}
+
+fn require_optional_info(
+    header: &vcf::Header,
+    key: &str,
+    number: InfoNumber,
+    ty: InfoType,
+) -> Result<()> {
+    if header.infos().contains_key(key) {
+        require_info(header, key, number, ty)?;
+    }
+    Ok(())
+}
+
+fn insert_indel_info(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    summary: Option<IndelSummary>,
+) -> Result<()> {
+    let Some(summary) = summary else {
+        return Ok(());
+    };
+    require_info(header, INDEL, InfoNumber::Count(0), InfoType::Flag)?;
+    require_info(header, IDV, InfoNumber::Count(1), InfoType::Integer)?;
+    require_info(header, IMF, InfoNumber::Count(1), InfoType::Float)?;
+    info.insert(INDEL.to_owned(), Some(InfoValue::Flag));
+    info.insert(
+        IDV.to_owned(),
+        Some(InfoValue::Integer(checked_info_integer(
+            summary.maximum_support(),
+            IDV,
+        )?)),
+    );
+    info.insert(
+        IMF.to_owned(),
+        Some(InfoValue::Float(summary.maximum_fraction())),
+    );
+    Ok(())
+}
+
+fn decode_indel_summary(record: &vcf::variant::RecordBuf) -> Result<Option<IndelSummary>> {
+    let is_indel = match record.info().get(INDEL) {
+        None => false,
+        Some(Some(InfoValue::Flag)) => true,
+        Some(_) => return Err(invalid("INFO/INDEL is not a flag")),
+    };
+    if !is_indel {
+        if record.info().get(IDV).is_some() || record.info().get(IMF).is_some() {
+            return Err(invalid(
+                "INFO/IDV or INFO/IMF is present without INFO/INDEL",
+            ));
+        }
+        return Ok(None);
+    }
+    let support = match record.info().get(IDV) {
+        Some(Some(InfoValue::Integer(value))) => {
+            u32::try_from(*value).map_err(|_| invalid("INFO/IDV contains a negative integer"))?
+        }
+        _ => return Err(invalid("indel record has no integer INFO/IDV value")),
+    };
+    let fraction = match record.info().get(IMF) {
+        Some(Some(InfoValue::Float(value))) => *value,
+        _ => return Err(invalid("indel record has no float INFO/IMF value")),
+    };
+    IndelSummary::new(support, fraction).map(Some)
 }
 
 fn require_format(

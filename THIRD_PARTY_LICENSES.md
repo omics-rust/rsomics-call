@@ -3,8 +3,16 @@
 The consensus caller is a clean Rust implementation of the allele-frequency
 posterior method in bcftools 1.24 `ccall.c` and `prob1.c`. Those files are
 copyright 2010–2011 Broad Institute and 2012–2017 Genome Research Ltd., with
-authorship credited to Heng Li and Petr Danecek, and are distributed under the
-MIT license:
+authorship credited to Heng Li and Petr Danecek.
+
+The indel likelihood implementation follows bcftools 1.24
+`bam2bcf_indel.c` and `str_finder.c`, copyright Broad Institute and Genome
+Research Ltd., with authorship credited to Heng Li and James Bonfield. Its
+glocal alignment model follows HTSlib 1.24 `probaln.c`, copyright Broad
+Institute and Genome Research Ltd. The source notices are retained in
+`LICENSES/BCFTOOLS-MIT.txt` and `LICENSES/HTSLIB-MIT.txt`.
+
+The bcftools files are distributed under the MIT license:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in

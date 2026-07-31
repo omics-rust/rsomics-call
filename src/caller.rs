@@ -210,6 +210,7 @@ impl MultiallelicCaller {
             quality,
             allele_counts: allele_counts.into_boxed_slice(),
             samples: samples.into_boxed_slice(),
+            indel_summary: site.indel_summary(),
         })
     }
 }

@@ -142,6 +142,32 @@ impl SampleLikelihood {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndelSummary {
+    maximum_support: u32,
+    maximum_fraction: f32,
+}
+
+impl IndelSummary {
+    pub fn new(maximum_support: u32, maximum_fraction: f32) -> Result<Self> {
+        if !maximum_fraction.is_finite() || !(0.0..=1.0).contains(&maximum_fraction) {
+            return Err(CallError::InvalidIndelSummary);
+        }
+        Ok(Self {
+            maximum_support,
+            maximum_fraction,
+        })
+    }
+
+    pub fn maximum_support(self) -> u32 {
+        self.maximum_support
+    }
+
+    pub fn maximum_fraction(self) -> f32 {
+        self.maximum_fraction
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LikelihoodSite {
     reference_sequence_id: usize,
@@ -150,6 +176,7 @@ pub struct LikelihoodSite {
     alternates: Box<[Allele]>,
     allele_quality_sums: Box<[f32]>,
     samples: Box<[SampleLikelihood]>,
+    indel_summary: Option<IndelSummary>,
 }
 
 impl LikelihoodSite {
@@ -197,7 +224,13 @@ impl LikelihoodSite {
             alternates,
             allele_quality_sums,
             samples,
+            indel_summary: None,
         })
+    }
+
+    pub fn with_indel_summary(mut self, summary: IndelSummary) -> Self {
+        self.indel_summary = Some(summary);
+        self
     }
 
     pub fn reference_sequence_id(&self) -> usize {
@@ -222,6 +255,10 @@ impl LikelihoodSite {
 
     pub fn samples(&self) -> &[SampleLikelihood] {
         &self.samples
+    }
+
+    pub fn indel_summary(&self) -> Option<IndelSummary> {
+        self.indel_summary
     }
 }
 

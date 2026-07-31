@@ -11,8 +11,9 @@ use rsomics_pileup::{BaqOptions, PileupEngine, PileupOptions};
 
 use crate::{
     AlignmentInput, AlignmentSet, CallError, CalledSite, CalledVariantWriter, CalledVcfSchema,
-    LikelihoodSite, LikelihoodVariantReader, Nucleotide, ReferenceSequence, Result, SampleMap,
-    SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder, VariantOutputFormat,
+    IndelLikelihoodConfig, IndelSiteBuilder, LikelihoodSite, LikelihoodVariantReader, Nucleotide,
+    ReferenceSequence, Result, SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder,
+    VariantOutputFormat,
 };
 
 pub struct SnpLikelihoodRun {
@@ -20,6 +21,7 @@ pub struct SnpLikelihoodRun {
     reference: ReferenceCache,
     pileup: PileupEngine,
     sites: SnpSiteBuilder,
+    indels: Option<IndelSiteBuilder>,
     baq: Option<BaqRun>,
 }
 
@@ -58,6 +60,7 @@ impl SnpLikelihoodRun {
             reference,
             pileup,
             sites,
+            indels: None,
             baq: None,
         })
     }
@@ -80,6 +83,14 @@ impl SnpLikelihoodRun {
         self
     }
 
+    pub fn with_indels(mut self, config: IndelLikelihoodConfig) -> Result<Self> {
+        self.indels = Some(IndelSiteBuilder::new(
+            self.alignments.samples().samples().len(),
+            config,
+        )?);
+        Ok(self)
+    }
+
     fn set_baq(&mut self, mode: BaqMode, maximum_read_len: usize, redo: bool) {
         self.baq = Some(BaqRun {
             mode,
@@ -99,6 +110,7 @@ impl SnpLikelihoodRun {
                 &mut self.pileup,
                 &mut self.reference,
                 &mut self.sites,
+                &mut self.indels,
                 self.alignments.samples(),
                 self.baq,
                 &mut emit,
@@ -109,6 +121,7 @@ impl SnpLikelihoodRun {
             &mut self.pileup,
             &mut self.reference,
             &mut self.sites,
+            &mut self.indels,
             self.alignments.samples(),
             self.baq,
             &mut emit,
@@ -151,6 +164,7 @@ fn drain_sites(
     pileup: &mut PileupEngine,
     reference: &mut ReferenceCache,
     sites: &mut SnpSiteBuilder,
+    indels: &mut Option<IndelSiteBuilder>,
     samples: &SampleMap,
     baq: Option<BaqRun>,
     emit: &mut impl FnMut(LikelihoodSite) -> Result<()>,
@@ -179,7 +193,23 @@ fn drain_sites(
         let site = sites.build(&column, reference_base, |source_id, record| {
             samples.sample_index(source_id, record)
         })?;
-        emit(site)
+        emit(site)?;
+        if let Some(indels) = indels {
+            let reference_length = reference.length(column.reference_id())?;
+            let mut fetch_reference = |range, buffer: &mut Vec<u8>| {
+                buffer.extend_from_slice(reference.sequence(column.reference_id(), range)?);
+                Ok::<_, CallError>(())
+            };
+            if let Some(site) = indels.build(
+                &column,
+                reference_length,
+                |source_id, record| samples.sample_index(source_id, record),
+                &mut fetch_reference,
+            )? {
+                emit(site)?;
+            }
+        }
+        Ok(())
     })
 }
 
@@ -229,6 +259,17 @@ impl ReferenceCache {
             b'T' => Nucleotide::T,
             _ => Nucleotide::N,
         })
+    }
+
+    fn length(&self, reference_id: i32) -> Result<usize> {
+        let reference_id =
+            usize::try_from(reference_id).map_err(|error| reference_error(&self.path, error))?;
+        let length = self
+            .references
+            .get(reference_id)
+            .map(|(_, length)| *length)
+            .ok_or_else(|| reference_error(&self.path, "reference ID is absent"))?;
+        usize::try_from(length).map_err(|error| reference_error(&self.path, error))
     }
 
     fn sequence(&mut self, reference_id: i32, range: Range<usize>) -> Result<&[u8]> {
@@ -302,8 +343,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Allele, ConsensusCaller, LikelihoodVariantWriter, LikelihoodVcfSchema, Ploidy,
-        SampleEvidence, SampleLikelihood,
+        Allele, ConsensusCaller, IndelSummary, LikelihoodVariantWriter, LikelihoodVcfSchema,
+        Ploidy, SampleEvidence, SampleLikelihood,
     };
 
     fn sam_file(sample: &str, base: char) -> NamedTempFile {
@@ -332,6 +373,26 @@ mod tests {
             writeln!(
                 file,
                 "read{index}\t0\tchr1\t1\t60\t1M\t*\t0\t0\tA\tI\tRG:Z:rg"
+            )
+            .unwrap();
+        }
+        file
+    }
+
+    fn indel_sam_file(sample: &str, cigar: &str, sequence: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "@HD\tVN:1.6\tSO:coordinate\n\
+             @SQ\tSN:MX\tLN:11\n\
+             @RG\tID:rg\tSM:{sample}"
+        )
+        .unwrap();
+        let qualities = "I".repeat(sequence.len());
+        for index in 1..=2 {
+            writeln!(
+                file,
+                "r{index}\t0\tMX\t1\t60\t{cigar}\t*\t0\t0\t{sequence}\t{qualities}\tRG:Z:rg"
             )
             .unwrap();
         }
@@ -652,6 +713,127 @@ mod tests {
                 .iter()
                 .all(|site| site.samples()[0].evidence().depth() == 2)
         );
+    }
+
+    #[test]
+    fn indel_likelihoods_match_bcftools_1_24() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        let alignment = indel_sam_file("sample", "5M1I6M", "CGTCTCACTACG");
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, alignment.path(), "input")],
+            reference,
+            SampleSelection::default(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_partial_baq(500, false)
+        .with_indels(IndelLikelihoodConfig::default())
+        .unwrap();
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        let site = sites
+            .iter()
+            .find(|site| site.alternates()[0].as_bytes() == b"TC")
+            .unwrap();
+        assert_eq!(site.position(), 4);
+        assert_eq!(site.reference().as_bytes(), b"T");
+        assert_eq!(site.alternates()[0].as_bytes(), b"TC");
+        assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[56, 6, 0][..]));
+        assert_eq!(site.samples()[0].evidence().depth(), 2);
+        assert_eq!(site.samples()[0].evidence().allele_depths(), &[0, 2]);
+        assert_eq!(site.samples()[0].evidence().allele_quality_sums(), &[0, 62]);
+        assert_eq!(
+            site.indel_summary(),
+            Some(IndelSummary::new(2, 1.0).unwrap())
+        );
+    }
+
+    #[test]
+    fn deletion_likelihoods_match_bcftools_1_24() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        let alignment = indel_sam_file("sample", "5M1D5M", "CGTCTCTACG");
+        let run = SnpLikelihoodRun::open(
+            [AlignmentInput::new(1, alignment.path(), "input")],
+            reference,
+            SampleSelection::default(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_partial_baq(500, false)
+        .with_indels(IndelLikelihoodConfig::default())
+        .unwrap();
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        let site = sites
+            .iter()
+            .find(|site| site.reference().as_bytes() == b"TA")
+            .unwrap();
+        assert_eq!(site.position(), 4);
+        assert_eq!(site.alternates()[0].as_bytes(), b"T");
+        assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[44, 6, 0][..]));
+        assert_eq!(site.samples()[0].evidence().allele_depths(), &[0, 2]);
+        assert_eq!(site.samples()[0].evidence().allele_quality_sums(), &[0, 48]);
+    }
+
+    #[test]
+    fn multisample_indel_likelihoods_match_bcftools_1_24() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        let alternate = indel_sam_file("alternate", "5M1I6M", "CGTCTCACTACG");
+        let reference_reads = indel_sam_file("reference", "11M", "CGTCTACTACG");
+        let trailing = indel_sam_file("trailing", "2M", "CG");
+        let run = SnpLikelihoodRun::open(
+            [
+                AlignmentInput::new(1, alternate.path(), "alternate"),
+                AlignmentInput::new(2, reference_reads.path(), "reference"),
+                AlignmentInput::new(3, trailing.path(), "trailing"),
+            ],
+            reference,
+            SampleSelection::default(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .with_partial_baq(500, false)
+        .with_indels(IndelLikelihoodConfig::default())
+        .unwrap();
+        let mut sites = Vec::new();
+        run.run(|site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+        let site = sites
+            .iter()
+            .find(|site| site.alternates()[0].as_bytes() == b"TC")
+            .unwrap();
+        assert_eq!(site.samples()[0].phred_likelihoods(), Some(&[56, 6, 0][..]));
+        assert_eq!(site.samples()[1].phred_likelihoods(), Some(&[0, 6, 47][..]));
+        assert_eq!(site.samples()[2].phred_likelihoods(), Some(&[0, 0, 0][..]));
+        assert_eq!(site.samples()[0].evidence().allele_quality_sums(), &[0, 62]);
+        assert_eq!(site.samples()[1].evidence().allele_quality_sums(), &[52, 0]);
+        assert_eq!(site.samples()[2].evidence().depth(), 0);
     }
 
     #[test]

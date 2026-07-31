@@ -114,6 +114,7 @@ impl ConsensusCaller {
             quality,
             allele_counts: allele_counts.into(),
             samples: samples.into(),
+            indel_summary: site.indel_summary(),
         })
     }
 }
