@@ -1,0 +1,23 @@
+[package]
+name = "rsomics-call"
+version = "0.1.0"
+description = "Typed alignment likelihood and small-variant calling workflow"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-call"
+homepage = "https://github.com/omics-rust/rsomics-call"
+authors = ["Zane Leong <efd@live.com>"]
+categories = ["science"]
+keywords = ["bioinformatics", "variant-calling", "genomics", "bam", "vcf"]
+readme = "README.md"
+
+[lib]
+doctest = false
+
+[dependencies]
+rsomics-pileup = { version = "0.2", git = "https://github.com/omics-rust/rsomics-pileup", rev = "2b2cb7071381bb4c86e8a7068f76c96b7035e1dd" }
+thiserror = "2"
+
+[dev-dependencies]
+rsomics-bamio = "0.2"

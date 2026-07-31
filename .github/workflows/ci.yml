@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - target: macos-x86_64
+            runner: macos-15-intel
+          - target: macos-aarch64
+            runner: macos-15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust 1.91
+        uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Format
+        if: matrix.target == 'linux-x86_64'
+        run: cargo fmt --all -- --check
+
+      - name: Strict Clippy
+        if: matrix.target == 'linux-x86_64'
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test debug
+        run: cargo test --all-targets --all-features
+
+      - name: Test release
+        run: cargo test --release --all-targets --all-features
