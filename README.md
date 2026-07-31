@@ -16,8 +16,9 @@ The current code establishes coordinate-merged SAM/BAM/CRAM input, multi-input
 sample projection, bounded reference caching, and a streaming SNP likelihood
 path with per-input depth limits, deterministic deep-sample selection, and
 allele-aligned site and sample quality evidence. The current slice is checked
-against bcftools and HTSlib 1.24 and includes the default single-group diploid
-multiallelic caller core. It does not yet expose a command-line binary.
+against bcftools and HTSlib 1.24 and includes the single-group zero-copy,
+haploid, and diploid multiallelic caller core. It does not yet expose a
+command-line binary.
 Incomplete commands stay absent until SNP/indel and BAQ likelihoods, complete
 consensus and multiallelic policies, VCF/BCF, oracle, and performance gates
 pass.

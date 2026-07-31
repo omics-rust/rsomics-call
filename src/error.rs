@@ -68,8 +68,14 @@ pub enum CallError {
     #[error("multiallelic mutation rate must be finite and between zero and one")]
     InvalidMutationRate,
 
-    #[error("the multiallelic caller currently requires diploid likelihoods")]
-    UnsupportedCallerPloidy,
+    #[error("the multiallelic caller requires diploid input likelihoods")]
+    UnsupportedLikelihoodPloidy,
+
+    #[error("the caller ploidy count differs from the likelihood sample count")]
+    CallerPloidyCountMismatch,
+
+    #[error("the prior chromosome count is outside the cohort ploidy range")]
+    InvalidPriorChromosomeCount,
 
     #[error("called allele count exceeds the supported range")]
     CalledAlleleCountOverflow,
