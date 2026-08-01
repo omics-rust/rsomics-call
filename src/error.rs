@@ -82,6 +82,16 @@ pub enum CallError {
     #[error("at least one region is required")]
     MissingRegions,
 
+    #[error("region input {path}: {message}")]
+    RegionInput { path: String, message: String },
+
+    #[error("region input {path} line {line}: {message}")]
+    RegionRecord {
+        path: String,
+        line: u64,
+        message: String,
+    },
+
     #[error("target input {path}: {message}")]
     TargetInput { path: String, message: String },
 

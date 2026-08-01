@@ -16,12 +16,12 @@ mod gvcf;
 mod indel;
 mod model;
 mod ploidy;
+mod region_file;
 mod run;
 mod samples;
 mod selection;
 mod snp;
 mod stream;
-mod target_file;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use call_annotation::CalledAnnotations;

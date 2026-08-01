@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::path::Path;
 
 use noodles::core::Region;
 
@@ -77,6 +78,23 @@ impl LikelihoodCallRun {
         W: Write,
     {
         let regions = reader.normalize_regions(regions)?;
+        let mut run = self.start(reader.schema(), output, format)?;
+        reader.visit_normalized_regions(regions, |record, site| run.push(record, &site))?;
+        run.finish()
+    }
+
+    pub fn run_indexed_regions_file<W>(
+        self,
+        reader: IndexedLikelihoodVariantReader,
+        regions: impl AsRef<Path>,
+        output: W,
+        format: VariantOutputFormat,
+    ) -> Result<W>
+    where
+        W: Write,
+    {
+        let regions = crate::region_file::read_regions(regions.as_ref())?;
+        let regions = reader.normalize_region_file(regions)?;
         let mut run = self.start(reader.schema(), output, format)?;
         reader.visit_normalized_regions(regions, |record, site| run.push(record, &site))?;
         run.finish()

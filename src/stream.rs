@@ -150,19 +150,26 @@ impl IndexedLikelihoodVariantReader {
     pub(crate) fn normalize_regions(
         &self,
         regions: impl IntoIterator<Item = Region>,
-    ) -> Result<Vec<VariantRegion>> {
+    ) -> Result<PreparedVariantRegions> {
         normalize_variant_regions(self.projection.input_header(), regions)
+    }
+
+    pub(crate) fn normalize_region_file(
+        &self,
+        regions: impl IntoIterator<Item = Region>,
+    ) -> Result<PreparedVariantRegions> {
+        normalize_variant_region_file(self.projection.input_header(), regions)
     }
 
     pub(crate) fn visit_normalized_regions(
         mut self,
-        regions: Vec<VariantRegion>,
+        regions: PreparedVariantRegions,
         mut visit: impl FnMut(u64, LikelihoodSite) -> Result<()>,
     ) -> Result<()> {
         let header = self.projection.input_header();
         let mut record_number = 0;
 
-        for (region_index, region) in regions.iter().enumerate() {
+        for (region_index, region) in regions.values.iter().enumerate() {
             let records = self
                 .inner
                 .query(header, &region.query)
@@ -182,9 +189,10 @@ impl IndexedLikelihoodVariantReader {
                 let end = record
                     .variant_end(header)
                     .map_err(|error| record_error(record_number, error))?;
-                if regions[..region_index]
-                    .iter()
-                    .any(|previous| previous.overlaps(region.reference_id, start, end))
+                if regions.deduplicate
+                    && regions.values[..region_index]
+                        .iter()
+                        .any(|previous| previous.overlaps(region.reference_id, start, end))
                 {
                     continue;
                 }
@@ -208,6 +216,11 @@ pub(crate) struct VariantRegion {
     end: Position,
 }
 
+pub(crate) struct PreparedVariantRegions {
+    values: Vec<VariantRegion>,
+    deduplicate: bool,
+}
+
 impl VariantRegion {
     fn overlaps(&self, reference_id: usize, start: Position, end: Position) -> bool {
         self.reference_id == reference_id && start <= self.end && end >= self.start
@@ -215,6 +228,54 @@ impl VariantRegion {
 }
 
 fn normalize_variant_regions(
+    header: &vcf::Header,
+    regions: impl IntoIterator<Item = Region>,
+) -> Result<PreparedVariantRegions> {
+    let mut values = resolve_variant_regions(header, regions)?;
+    values.sort_unstable_by_key(|region| (region.reference_id, region.start, region.end));
+
+    let mut merged: Vec<VariantRegion> = Vec::with_capacity(values.len());
+    for region in values {
+        if let Some(previous) = merged.last_mut()
+            && previous.reference_id == region.reference_id
+            && region.start <= previous.end.checked_add(1).unwrap_or(Position::MAX)
+        {
+            previous.end = previous.end.max(region.end);
+            previous.query = Region::new(
+                previous.query.name().to_vec(),
+                previous.start..=previous.end,
+            );
+        } else {
+            merged.push(region);
+        }
+    }
+    Ok(PreparedVariantRegions {
+        values: merged,
+        deduplicate: true,
+    })
+}
+
+fn normalize_variant_region_file(
+    header: &vcf::Header,
+    regions: impl IntoIterator<Item = Region>,
+) -> Result<PreparedVariantRegions> {
+    let mut values = resolve_variant_regions(header, regions)?;
+    let mut ranks = vec![usize::MAX; header.contigs().len()];
+    let mut next_rank = 0;
+    for region in &values {
+        if ranks[region.reference_id] == usize::MAX {
+            ranks[region.reference_id] = next_rank;
+            next_rank += 1;
+        }
+    }
+    values.sort_by_key(|region| (ranks[region.reference_id], region.start, region.end));
+    Ok(PreparedVariantRegions {
+        values,
+        deduplicate: true,
+    })
+}
+
+fn resolve_variant_regions(
     header: &vcf::Header,
     regions: impl IntoIterator<Item = Region>,
 ) -> Result<Vec<VariantRegion>> {
@@ -244,34 +305,17 @@ fn normalize_variant_regions(
             Some(length) => region.interval().end().unwrap_or(length).min(length),
             None => region.interval().end().unwrap_or(Position::MAX),
         };
-        values.push((reference_id, name.to_owned(), start, end));
-    }
-    if values.is_empty() {
-        return Err(CallError::MissingRegions);
-    }
-    values.sort_unstable_by_key(|(reference_id, _, start, end)| (*reference_id, *start, *end));
-
-    let mut merged: Vec<(usize, String, Position, Position)> = Vec::with_capacity(values.len());
-    for (reference_id, name, start, end) in values {
-        if let Some((previous_id, _, _, previous_end)) = merged.last_mut()
-            && *previous_id == reference_id
-            && start <= previous_end.checked_add(1).unwrap_or(Position::MAX)
-        {
-            *previous_end = (*previous_end).max(end);
-        } else {
-            merged.push((reference_id, name, start, end));
-        }
-    }
-
-    Ok(merged
-        .into_iter()
-        .map(|(reference_id, name, start, end)| VariantRegion {
+        values.push(VariantRegion {
             query: Region::new(name, start..=end),
             reference_id,
             start,
             end,
-        })
-        .collect())
+        });
+    }
+    if values.is_empty() {
+        return Err(CallError::MissingRegions);
+    }
+    Ok(values)
 }
 
 pub(crate) struct LikelihoodProjection {

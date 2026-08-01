@@ -178,7 +178,7 @@ impl SnpLikelihoodRun {
     }
 
     pub fn with_target_file(self, path: impl AsRef<Path>) -> Result<Self> {
-        Ok(self.with_targets(crate::target_file::read(path.as_ref())?))
+        Ok(self.with_targets(crate::region_file::read_targets(path.as_ref())?))
     }
 
     fn set_baq(&mut self, mode: BaqMode, maximum_read_len: usize, redo: bool) {

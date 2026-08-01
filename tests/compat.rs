@@ -103,6 +103,16 @@ fn write_indexed_alignment(
     path
 }
 
+fn write_indexed_variant(directory: &Path, name: &str, data: &[u8]) -> PathBuf {
+    let input = directory.join(format!("{name}.vcf.gz"));
+    let mut writer = noodles::bgzf::io::Writer::new(File::create(&input).unwrap());
+    writer.write_all(data).unwrap();
+    writer.finish().unwrap();
+    let index = vcf::fs::index(&input).unwrap();
+    noodles::tabix::fs::write(format!("{}.tbi", input.display()), &index).unwrap();
+    input
+}
+
 fn decode_likelihoods(output: &[u8]) -> Vec<LikelihoodSite> {
     let mut reader = LikelihoodVariantReader::new(output).unwrap();
     let mut sites = Vec::new();
@@ -446,7 +456,6 @@ fn call_workflow_matches_bcftools_1_24() {
 fn indexed_call_regions_match_bcftools_1_24() {
     assert_bcftools_1_24();
     let directory = tempfile::tempdir().unwrap();
-    let input = directory.path().join("indexed-call.vcf.gz");
     let data = "##fileformat=VCFv4.2\n\
                 ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
                 ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n\
@@ -456,11 +465,7 @@ fn indexed_call_regions_match_bcftools_1_24() {
                 chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n\
                 chr1\t2\t.\tAAA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n\
                 chr1\t3\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n";
-    let mut writer = noodles::bgzf::io::Writer::new(File::create(&input).unwrap());
-    writer.write_all(data.as_bytes()).unwrap();
-    writer.finish().unwrap();
-    let index = vcf::fs::index(&input).unwrap();
-    noodles::tabix::fs::write(format!("{}.tbi", input.display()), &index).unwrap();
+    let input = write_indexed_variant(directory.path(), "indexed-call", data.as_bytes());
 
     let expected = Command::new(bcftools())
         .args([
@@ -504,6 +509,83 @@ fn indexed_call_regions_match_bcftools_1_24() {
         sample_call_signature(&actual),
         sample_call_signature(&expected.stdout)
     );
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn indexed_call_region_file_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = write_indexed_variant(
+        directory.path(),
+        "region-file-call",
+        b"##fileformat=VCFv4.2\n\
+          ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+          ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n\
+          ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+          ##contig=<ID=chr1,length=10>\n\
+          ##contig=<ID=chr2,length=10>\n\
+          #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n\
+          chr1\t1\t.\tA\tG\t.\t.\tQS=1,1\tPL:DP\t40,3,0:1\n\
+          chr1\t2\t.\tA\tG\t.\t.\tQS=1,1\tPL:DP\t40,3,0:2\n\
+          chr1\t4\t.\tA\tG\t.\t.\tQS=1,1\tPL:DP\t40,3,0:4\n\
+          chr2\t2\t.\tA\tG\t.\t.\tQS=1,1\tPL:DP\t40,3,0:3\n",
+    );
+    let tab = directory.path().join("regions.txt");
+    fs::write(&tab, b"chr2\t2\t2\nchr1\t1\t2\nchr1\t2\t2\n").unwrap();
+    let bed = directory.path().join("regions.bed");
+    fs::write(&bed, b"chr2\t1\t2\nchr1\t0\t2\n").unwrap();
+    let vcf = directory.path().join("regions.vcf");
+    fs::write(
+        &vcf,
+        b"##fileformat=VCFv4.2\n\
+          #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+          chr2\t2\t.\tA\tG\t.\t.\t.\n\
+          chr1\t2\t.\tAAA\tG\t.\t.\t.\n",
+    )
+    .unwrap();
+    let coordinates = |data: &[u8]| {
+        String::from_utf8(data.to_vec())
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| line.split('\t').take(2).collect::<Vec<_>>().join(":"))
+            .collect::<Vec<_>>()
+    };
+    for regions in [tab, bed, vcf] {
+        let expected = Command::new(bcftools())
+            .args(["call", "-m", "-a", "GP,GQ", "-R"])
+            .arg(&regions)
+            .arg("-Ov")
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        let reader = IndexedLikelihoodVariantReader::open(&input).unwrap();
+        let resolver = PloidyDefinition::preset(PloidyPreset::Diploid)
+            .default_resolver(1)
+            .unwrap();
+        let actual = LikelihoodCallRun::new(
+            CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+            resolver,
+        )
+        .run_indexed_regions_file(
+            reader,
+            &regions,
+            Vec::new(),
+            rsomics_call::VariantOutputFormat::Vcf,
+        )
+        .unwrap();
+        assert_eq!(coordinates(&actual), coordinates(&expected.stdout));
+        assert_eq!(
+            sample_call_signature(&actual),
+            sample_call_signature(&expected.stdout)
+        );
+    }
 }
 
 fn sample_call_signature(data: &[u8]) -> (Vec<String>, Vec<Vec<(String, String)>>) {
