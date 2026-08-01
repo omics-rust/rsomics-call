@@ -34,7 +34,7 @@ pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use format::{CalledVcfSchema, LikelihoodVcfSchema};
 pub use gvcf::GvcfBlocker;
-pub use indel::{IndelLikelihoodConfig, IndelSiteBuilder};
+pub use indel::{IndelAmbiguousReadPolicy, IndelLikelihoodConfig, IndelSiteBuilder};
 pub use model::{
     Allele, IndelSummary, LikelihoodSite, Ploidy, PriorAlleleCounts, SampleAnnotations,
     SampleEvidence, SampleLikelihood, SiteAnnotations,

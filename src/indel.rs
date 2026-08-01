@@ -27,6 +27,16 @@ pub struct IndelLikelihoodConfig {
     mapping_quality_cap: u8,
     indel_bias: f64,
     random_seed: i32,
+    per_sample_support: bool,
+    ambiguous_reads: IndelAmbiguousReadPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IndelAmbiguousReadPolicy {
+    #[default]
+    Drop,
+    DistributeAlleleDepth,
+    AddToReferenceAlleleDepth,
 }
 
 impl Default for IndelLikelihoodConfig {
@@ -43,6 +53,8 @@ impl Default for IndelLikelihoodConfig {
             mapping_quality_cap: 60,
             indel_bias: 1.0,
             random_seed: 0,
+            per_sample_support: false,
+            ambiguous_reads: IndelAmbiguousReadPolicy::Drop,
         }
     }
 }
@@ -100,6 +112,16 @@ impl IndelLikelihoodConfig {
 
     pub fn with_random_seed(mut self, seed: i32) -> Self {
         self.random_seed = seed;
+        self
+    }
+
+    pub fn with_per_sample_support(mut self, enabled: bool) -> Self {
+        self.per_sample_support = enabled;
+        self
+    }
+
+    pub fn with_ambiguous_read_policy(mut self, policy: IndelAmbiguousReadPolicy) -> Self {
+        self.ambiguous_reads = policy;
         self
     }
 }
@@ -331,6 +353,10 @@ impl IndelSiteBuilder {
             let mut depth = 0u64;
             let mut allele_depths = vec![0u64; allele_count];
             let mut quality_sums = vec![0u64; allele_count];
+            let mut forward_depths = vec![0u64; allele_count];
+            let mut reverse_depths = vec![0u64; allele_count];
+            let mut missed_forward = vec![0u64; allele_count];
+            let mut missed_reverse = vec![0u64; allele_count];
             let mut annotations = AnnotationEvidence::default();
             let sample_depth = reads
                 .iter()
@@ -363,7 +389,17 @@ impl IndelSiteBuilder {
                 if sample_depth > 20 {
                     sequence_quality = sequence_quality.min(40);
                 }
-                if quality < self.config.minimum_base_quality || allele >= allele_count {
+                if quality < self.config.minimum_base_quality {
+                    if read.projection.indel == 0 && allele < allele_count {
+                        if read.record.flags() & REVERSE == 0 {
+                            missed_forward[allele] += 1;
+                        } else {
+                            missed_reverse[allele] += 1;
+                        }
+                    }
+                    continue;
+                }
+                if allele >= allele_count {
                     continue;
                 }
                 depth += 1;
@@ -375,6 +411,11 @@ impl IndelSiteBuilder {
                 let mapping_quality = raw_mapping_quality.min(self.config.mapping_quality_cap);
                 quality = quality.min(mapping_quality).clamp(4, 63);
                 allele_depths[allele] += 1;
+                if read.record.flags() & REVERSE == 0 {
+                    forward_depths[allele] += 1;
+                } else {
+                    reverse_depths[allele] += 1;
+                }
                 quality_sums[allele] += u64::from(quality);
                 annotations.observe(
                     read.record,
@@ -395,6 +436,19 @@ impl IndelSiteBuilder {
                     read.record.flags() & REVERSE != 0,
                 ));
             }
+            compensate_ambiguous_depths(
+                self.config.ambiguous_reads,
+                &mut allele_depths,
+                StrandDepths {
+                    forward: &forward_depths,
+                    reverse: &reverse_depths,
+                },
+                StrandDepths {
+                    forward: &missed_forward,
+                    reverse: &missed_reverse,
+                },
+                &mut annotations,
+            );
             let matrix = self.model.calculate(&mut self.observations)?;
             let phred_likelihoods = likelihoods(&matrix, allele_count);
             let selected = (0..allele_count).collect::<Vec<_>>();
@@ -413,6 +467,51 @@ impl IndelSiteBuilder {
         }
         Ok((samples, annotation_evidence))
     }
+}
+
+struct StrandDepths<'a> {
+    forward: &'a [u64],
+    reverse: &'a [u64],
+}
+
+fn compensate_ambiguous_depths(
+    policy: IndelAmbiguousReadPolicy,
+    allele_depths: &mut [u64],
+    observed: StrandDepths<'_>,
+    missed: StrandDepths<'_>,
+    annotations: &mut AnnotationEvidence,
+) {
+    if policy == IndelAmbiguousReadPolicy::Drop {
+        return;
+    }
+    let missed_forward = missed.forward.iter().sum::<u64>();
+    let missed_reverse = missed.reverse.iter().sum::<u64>();
+    let forward_total = observed.forward.iter().sum::<u64>();
+    let reverse_total = observed.reverse.iter().sum::<u64>();
+    for (allele, depth) in allele_depths.iter_mut().enumerate() {
+        let (forward, reverse) = match policy {
+            IndelAmbiguousReadPolicy::DistributeAlleleDepth => (
+                distribute_depth(observed.forward[allele], forward_total, missed_forward),
+                distribute_depth(observed.reverse[allele], reverse_total, missed_reverse),
+            ),
+            IndelAmbiguousReadPolicy::AddToReferenceAlleleDepth if allele == 0 => {
+                (missed_forward, missed_reverse)
+            }
+            IndelAmbiguousReadPolicy::AddToReferenceAlleleDepth => (0, 0),
+            IndelAmbiguousReadPolicy::Drop => unreachable!(),
+        };
+        *depth += forward + reverse;
+        if forward != 0 || reverse != 0 {
+            annotations.add_allele_depth(allele, forward, reverse);
+        }
+    }
+}
+
+fn distribute_depth(observed: u64, observed_total: u64, missed_total: u64) -> u64 {
+    if observed_total == 0 || missed_total == 0 {
+        return 0;
+    }
+    (missed_total as f32 * observed as f32 / observed_total as f32).round() as u64
 }
 
 struct Read<'a> {
@@ -454,10 +553,21 @@ impl Candidates {
         }
         let total_depth = sample_depths.iter().sum::<usize>();
         let total_support = sample_support.iter().sum::<usize>();
-        if total_depth == 0
-            || total_support < config.minimum_support
-            || total_support as f64 / (total_depth as f64) < config.minimum_fraction
-        {
+        let support_passes = if config.per_sample_support {
+            sample_support
+                .iter()
+                .zip(&sample_depths)
+                .any(|(&support, &depth)| {
+                    depth != 0
+                        && support >= config.minimum_support
+                        && support as f64 / depth as f64 >= config.minimum_fraction
+                })
+        } else {
+            total_depth != 0
+                && total_support >= config.minimum_support
+                && total_support as f64 / total_depth as f64 >= config.minimum_fraction
+        };
+        if !support_passes {
             return Ok(None);
         }
         types.sort_unstable();

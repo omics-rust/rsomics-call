@@ -8,10 +8,10 @@ use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
     AlignmentInput, CallModel, CallOutputOptions, CallSampleSelection, CalledVcfSchema,
-    GvcfBlocker, IndelLikelihoodConfig, IndexedLikelihoodVariantReader, LikelihoodCallRun,
-    LikelihoodSite, LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller,
-    MultiallelicCallerConfig, PloidyDefinition, PloidyPreset, SamplePloidy, SampleSelection,
-    SnpLikelihoodConfig, SnpLikelihoodRun,
+    GvcfBlocker, IndelAmbiguousReadPolicy, IndelLikelihoodConfig, IndexedLikelihoodVariantReader,
+    LikelihoodCallRun, LikelihoodSite, LikelihoodVariantReader, LikelihoodVcfSchema,
+    MultiallelicCaller, MultiallelicCallerConfig, PloidyDefinition, PloidyPreset, SamplePloidy,
+    SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
 
@@ -1023,11 +1023,21 @@ fn genotype_for_ploidy(ploidy: rsomics_call::CallPloidy) -> &'static str {
 }
 
 fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
+    bcftools_indel_with(reference, alignments, &[])
+}
+
+fn bcftools_indel_with(
+    reference: &Path,
+    alignments: &[PathBuf],
+    arguments: &[&str],
+) -> LikelihoodSite {
     let mut command = Command::new(bcftools());
     command
         .args(["mpileup", "-f"])
         .arg(reference)
-        .args(["-a", ANNOTATIONS, "-Ou"]);
+        .args(["-a", ANNOTATIONS])
+        .args(arguments)
+        .arg("-Ou");
     command.args(alignments);
     let output = command.output().unwrap();
     assert!(
@@ -1045,6 +1055,14 @@ fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
 }
 
 fn rsomics_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
+    rsomics_indel_with(reference, alignments, IndelLikelihoodConfig::default())
+}
+
+fn rsomics_indel_with(
+    reference: &Path,
+    alignments: &[PathBuf],
+    config: IndelLikelihoodConfig,
+) -> LikelihoodSite {
     let inputs = alignments
         .iter()
         .enumerate()
@@ -1059,7 +1077,7 @@ fn rsomics_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
     .unwrap()
     .with_partial_baq(500, false)
     .unwrap()
-    .with_indels(IndelLikelihoodConfig::default())
+    .with_indels(config)
     .unwrap();
     let mut indel = None;
     run.run(|site| {
@@ -1229,6 +1247,89 @@ fn indel_likelihoods_match_bcftools_1_24() {
         )],
         &[bcftools_indel(&repeat_reference, &[repeat_insertion])],
     );
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn ambiguous_indel_depth_policy_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = write_reference(directory.path(), "CGTCTACTACG");
+    let insertion = write_alignment(
+        directory.path(),
+        "insertion",
+        "sample",
+        11,
+        "5M1I6M",
+        "CGTCTCACTACG",
+    );
+    let reference_reads = write_alignment(
+        directory.path(),
+        "reference",
+        "sample",
+        11,
+        "11M",
+        "CGTCTACTACG",
+    );
+    let alignments = [insertion, reference_reads];
+
+    for (argument, policy) in [
+        ("drop", IndelAmbiguousReadPolicy::Drop),
+        ("incAD", IndelAmbiguousReadPolicy::DistributeAlleleDepth),
+        (
+            "incAD0",
+            IndelAmbiguousReadPolicy::AddToReferenceAlleleDepth,
+        ),
+    ] {
+        let actual = rsomics_indel_with(
+            &reference,
+            &alignments,
+            IndelLikelihoodConfig::default()
+                .with_minimum_base_quality(30)
+                .with_ambiguous_read_policy(policy),
+        );
+        let expected = bcftools_indel_with(
+            &reference,
+            &alignments,
+            &["-Q", "30", "--ambig-reads", argument],
+        );
+        assert_sites_match(&[actual], &[expected]);
+    }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn per_sample_indel_support_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = write_reference(directory.path(), "CGTCTACTACG");
+    let insertion = write_alignment(
+        directory.path(),
+        "insertion",
+        "alternate",
+        11,
+        "5M1I6M",
+        "CGTCTCACTACG",
+    );
+    let reference_reads = write_alignment(
+        directory.path(),
+        "reference",
+        "reference",
+        11,
+        "11M",
+        "CGTCTACTACG",
+    );
+    let alignments = [insertion, reference_reads];
+    let actual = rsomics_indel_with(
+        &reference,
+        &alignments,
+        IndelLikelihoodConfig::default()
+            .with_minimum_fraction(0.6)
+            .with_per_sample_support(true),
+    );
+    let expected = bcftools_indel_with(&reference, &alignments, &["-F", "0.6", "-p"]);
+
+    assert_sites_match(&[actual], &[expected]);
 }
 
 #[test]

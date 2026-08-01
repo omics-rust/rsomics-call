@@ -98,6 +98,11 @@ impl AnnotationEvidence {
         self.raw_depth += 1;
     }
 
+    pub(crate) fn add_allele_depth(&mut self, allele: usize, forward: u64, reverse: u64) {
+        self.forward[allele] += forward;
+        self.reverse[allele] += reverse;
+    }
+
     pub(crate) fn observe_indel_candidate(
         &mut self,
         record: &RawRecord,
@@ -205,7 +210,8 @@ impl AnnotationEvidence {
                 if depth == 0 {
                     0
                 } else {
-                    (-4.3429 * (self.error_sums[allele] / depth as f64).ln() + 0.499) as u32
+                    (-4.3429 * (self.error_sums[allele] / depth as f64).ln() + 0.499)
+                        .min(f64::from(i32::MAX)) as u32
                 }
             })
             .collect::<Vec<_>>();

@@ -1354,6 +1354,113 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_indel_reads_only_change_allele_depth_annotations() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        let alternate = indel_sam_file("sample", "5M1I6M", "CGTCTCACTACG");
+        let reference_reads = indel_sam_file("sample", "11M", "CGTCTACTACG");
+        let run = |policy| {
+            let likelihoods = SnpLikelihoodRun::open(
+                [
+                    AlignmentInput::new(1, alternate.path(), "alternate"),
+                    AlignmentInput::new(2, reference_reads.path(), "reference"),
+                ],
+                &reference,
+                SampleSelection::default(),
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            )
+            .unwrap()
+            .with_partial_baq(500, false)
+            .unwrap()
+            .with_indels(
+                IndelLikelihoodConfig::default()
+                    .with_minimum_base_quality(30)
+                    .with_ambiguous_read_policy(policy),
+            )
+            .unwrap();
+            let mut indel = None;
+            likelihoods
+                .run(|site| {
+                    if site.indel_summary().is_some() {
+                        indel = Some(site);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            indel.unwrap()
+        };
+
+        let drop = run(crate::IndelAmbiguousReadPolicy::Drop);
+        let distribute = run(crate::IndelAmbiguousReadPolicy::DistributeAlleleDepth);
+        let reference = run(crate::IndelAmbiguousReadPolicy::AddToReferenceAlleleDepth);
+
+        assert_eq!(drop.samples()[0].evidence().allele_depths(), [0, 2]);
+        assert_eq!(distribute.samples()[0].evidence().allele_depths(), [0, 4]);
+        assert_eq!(reference.samples()[0].evidence().allele_depths(), [2, 2]);
+        assert_eq!(
+            reference.samples()[0]
+                .evidence()
+                .annotations()
+                .unwrap()
+                .allele_quality_means(),
+            [i32::MAX as u32, 31]
+        );
+        assert_eq!(
+            drop.samples()[0].phred_likelihoods(),
+            distribute.samples()[0].phred_likelihoods()
+        );
+        assert_eq!(
+            drop.samples()[0].phred_likelihoods(),
+            reference.samples()[0].phred_likelihoods()
+        );
+    }
+
+    #[test]
+    fn per_sample_indel_support_can_retain_a_cohort_rare_candidate() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">MX\nCGTCTACTACG\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"MX\t11\t4\t11\t12\n").unwrap();
+        let alternate = indel_sam_file("alternate", "5M1I6M", "CGTCTCACTACG");
+        let reference_reads = indel_sam_file("reference", "11M", "CGTCTACTACG");
+        let count = |per_sample_support| {
+            let likelihoods = SnpLikelihoodRun::open(
+                [
+                    AlignmentInput::new(1, alternate.path(), "alternate"),
+                    AlignmentInput::new(2, reference_reads.path(), "reference"),
+                ],
+                &reference,
+                SampleSelection::default(),
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            )
+            .unwrap()
+            .with_partial_baq(500, false)
+            .unwrap()
+            .with_indels(
+                IndelLikelihoodConfig::default()
+                    .with_minimum_fraction(0.6)
+                    .with_per_sample_support(per_sample_support),
+            )
+            .unwrap();
+            let mut count = 0;
+            likelihoods
+                .run(|site| {
+                    count += usize::from(site.indel_summary().is_some());
+                    Ok(())
+                })
+                .unwrap();
+            count
+        };
+
+        assert_eq!(count(false), 0);
+        assert_eq!(count(true), 1);
+    }
+
+    #[test]
     fn deletion_likelihoods_match_bcftools_1_24() {
         let directory = tempfile::tempdir().unwrap();
         let reference = directory.path().join("reference.fa");

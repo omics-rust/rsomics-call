@@ -26,7 +26,8 @@ regions when both are present. Target files accept BED, one-based tabular, and
 VCF coordinates with transparent plain, gzip, or BGZF input. The library
 includes full and partial BAQ, insertion and
 deletion likelihoods, sample-specific reference consensus, glocal realignment,
-STR penalties, typed indel annotations, zero-copy, haploid, diploid, and
+STR penalties, pooled or per-sample candidate support, explicit ambiguous-read
+allele-depth policy, typed indel annotations, zero-copy, haploid, diploid, and
 independently grouped multiallelic calls, a fused typed calling path, and strict
 likelihood and called-record streams for plain VCF, BGZF VCF, raw BCF, and BGZF
 BCF. Pileup records carry the bcftools default bias metrics plus strand-aware
