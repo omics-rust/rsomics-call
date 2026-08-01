@@ -1,9 +1,12 @@
 use std::io::{Read, Write};
 
+use noodles::core::Region;
+
 use crate::{
     CallError, CallPloidy, CalledSite, CalledVariantWriter, CalledVcfSchema, ConsensusCaller,
-    ConsensusCallerConfig, GvcfBlocker, LikelihoodSite, LikelihoodVariantReader,
-    MultiallelicCaller, MultiallelicCallerConfig, PloidyResolver, Result, VariantOutputFormat,
+    ConsensusCallerConfig, GvcfBlocker, IndexedLikelihoodVariantReader, LikelihoodSite,
+    LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, MultiallelicCallerConfig,
+    PloidyResolver, Result, VariantOutputFormat,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,7 +50,7 @@ impl LikelihoodCallRun {
     }
 
     pub fn run<R, W>(
-        mut self,
+        self,
         mut reader: LikelihoodVariantReader<R>,
         output: W,
         format: VariantOutputFormat,
@@ -56,50 +59,110 @@ impl LikelihoodCallRun {
         R: Read,
         W: Write,
     {
-        if self.ploidy.sample_count() != reader.schema().header().sample_names().len() {
+        let mut run = self.start(reader.schema(), output, format)?;
+        while let Some(site) = reader.read_site()? {
+            run.push(reader.record_number(), &site)?;
+        }
+        run.finish()
+    }
+
+    pub fn run_indexed<W>(
+        self,
+        reader: IndexedLikelihoodVariantReader,
+        regions: impl IntoIterator<Item = Region>,
+        output: W,
+        format: VariantOutputFormat,
+    ) -> Result<W>
+    where
+        W: Write,
+    {
+        let regions = reader.normalize_regions(regions)?;
+        let mut run = self.start(reader.schema(), output, format)?;
+        reader.visit_normalized_regions(regions, |record, site| run.push(record, &site))?;
+        run.finish()
+    }
+
+    fn start<W>(
+        self,
+        input_schema: &LikelihoodVcfSchema,
+        output: W,
+        format: VariantOutputFormat,
+    ) -> Result<ActiveCallRun<W>>
+    where
+        W: Write,
+    {
+        let sample_count = self.ploidy.sample_count();
+        if sample_count != input_schema.header().sample_names().len() {
             return Err(CallError::PloidySampleCountMismatch);
         }
-        if self.gvcf.is_some() && !reader.schema().header().formats().contains_key("DP") {
+        if self.gvcf.is_some() && !input_schema.header().formats().contains_key("DP") {
             return Err(CallError::MissingGvcfDepth);
         }
         let schema = match &self.caller {
-            SiteCaller::Multiallelic(_) => CalledVcfSchema::from_likelihood(reader.schema()),
-            SiteCaller::Consensus(_) => CalledVcfSchema::from_consensus_likelihood(reader.schema()),
+            SiteCaller::Multiallelic(_) => CalledVcfSchema::from_likelihood(input_schema),
+            SiteCaller::Consensus(_) => CalledVcfSchema::from_consensus_likelihood(input_schema),
         };
         let schema = if self.gvcf.is_some() {
             schema.with_gvcf()
         } else {
             schema
         };
-        let mut writer = CalledVariantWriter::new(output, schema, format)?;
-        let mut ploidies = Vec::with_capacity(self.ploidy.sample_count());
-
-        while let Some(site) = reader.read_site()? {
-            let record = reader.record_number();
-            let reference = reader
-                .schema()
+        Ok(ActiveCallRun {
+            caller: self.caller,
+            ploidy: self.ploidy,
+            gvcf: self.gvcf,
+            writer: CalledVariantWriter::new(output, schema, format)?,
+            reference_names: input_schema
                 .header()
                 .contigs()
-                .get_index(site.reference_sequence_id())
-                .expect("decoded contig ID belongs to the reader schema")
-                .0;
-            self.ploidy
-                .resolve_site_into(reference, &site, &mut ploidies)
-                .map_err(|error| call_record_error(record, error))?;
-            let called = self
-                .caller
-                .call(&site, &ploidies, self.ploidy.prior_chromosome_count())
-                .map_err(|error| call_record_error(record, error))?;
-            if let Some(blocker) = &mut self.gvcf {
-                blocker.push(called, |called| writer.write_site(&called))?;
-            } else {
-                writer.write_site(&called)?;
-            }
+                .keys()
+                .map(|name| Box::<str>::from(name.as_str()))
+                .collect(),
+            ploidies: Vec::with_capacity(sample_count),
+        })
+    }
+}
+
+struct ActiveCallRun<W>
+where
+    W: Write,
+{
+    caller: SiteCaller,
+    ploidy: PloidyResolver,
+    gvcf: Option<GvcfBlocker>,
+    writer: CalledVariantWriter<W>,
+    reference_names: Box<[Box<str>]>,
+    ploidies: Vec<CallPloidy>,
+}
+
+impl<W> ActiveCallRun<W>
+where
+    W: Write,
+{
+    fn push(&mut self, record: u64, site: &LikelihoodSite) -> Result<()> {
+        let reference = self
+            .reference_names
+            .get(site.reference_sequence_id())
+            .expect("decoded contig ID belongs to the reader schema");
+        self.ploidy
+            .resolve_site_into(reference, site, &mut self.ploidies)
+            .map_err(|error| call_record_error(record, error))?;
+        let called = self
+            .caller
+            .call(site, &self.ploidies, self.ploidy.prior_chromosome_count())
+            .map_err(|error| call_record_error(record, error))?;
+        if let Some(blocker) = &mut self.gvcf {
+            blocker.push(called, |called| self.writer.write_site(&called))
+        } else {
+            self.writer.write_site(&called)
         }
+    }
+
+    fn finish(mut self) -> Result<W> {
         if let Some(blocker) = self.gvcf {
-            blocker.finish(|called| writer.write_site(&called))?;
+            blocker.finish(|called| self.writer.write_site(&called))?;
         }
-        writer.finish()
+        self.writer.finish()
     }
 }
 

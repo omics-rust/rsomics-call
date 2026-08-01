@@ -1,4 +1,6 @@
+use std::fs::File;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::{Allele, MultiallelicCaller, Ploidy, SampleEvidence, SampleLikelihood};
@@ -201,6 +203,76 @@ fn rejects_invalid_or_late_likelihood_sample_selection() {
     ));
 }
 
+#[test]
+fn indexed_regions_follow_header_order_and_deduplicate_spanning_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let schema = LikelihoodVcfSchema::new(
+        [(b"chr2".as_slice(), 100), (b"chr1".as_slice(), 100)],
+        ["sample"],
+    )
+    .unwrap();
+    let input = write_indexed_likelihoods(
+        directory.path(),
+        schema,
+        [site(0, 9, b"AAAAAA"), site(1, 1, b"A"), site(1, 3, b"A")],
+    );
+    let reader = IndexedLikelihoodVariantReader::open(input).unwrap();
+    let mut sites = Vec::new();
+    let regions = reader
+        .normalize_regions(
+            ["chr1:4-4", "chr2:13-13", "chr2:10-10"].map(|region| region.parse().unwrap()),
+        )
+        .unwrap();
+    reader
+        .visit_normalized_regions(regions, |_, site| {
+            sites.push(site);
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        sites
+            .iter()
+            .map(|site| (site.reference_sequence_id(), site.position()))
+            .collect::<Vec<_>>(),
+        [(0, 9), (1, 3)]
+    );
+}
+
+#[test]
+fn indexed_regions_validate_selection_and_project_samples() {
+    let directory = tempfile::tempdir().unwrap();
+    let (schema, site) = multi_sample_fixture();
+    let input = write_indexed_likelihoods(directory.path(), schema, [site]);
+    let reader = IndexedLikelihoodVariantReader::open(&input)
+        .unwrap()
+        .select_samples(["third", "first"])
+        .unwrap();
+    assert_eq!(
+        reader
+            .schema()
+            .header()
+            .sample_names()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["third", "first"]
+    );
+
+    assert!(matches!(
+        IndexedLikelihoodVariantReader::open(&input)
+            .unwrap()
+            .normalize_regions(std::iter::empty()),
+        Err(CallError::MissingRegions)
+    ));
+    assert!(matches!(
+        IndexedLikelihoodVariantReader::open(input)
+            .unwrap()
+            .normalize_regions(["missing:1-2".parse().unwrap()]),
+        Err(CallError::InvalidRegion { .. })
+    ));
+}
+
 fn fixture() -> (LikelihoodVcfSchema, LikelihoodSite) {
     let schema = LikelihoodVcfSchema::new([(b"chr1".as_slice(), 100)], ["sample"]).unwrap();
     let site = LikelihoodSite::new(
@@ -242,6 +314,44 @@ fn multi_sample_fixture() -> (LikelihoodVcfSchema, LikelihoodSite) {
     )
     .unwrap();
     (schema, site)
+}
+
+fn site(reference_sequence_id: usize, position: u64, reference: &[u8]) -> LikelihoodSite {
+    LikelihoodSite::new(
+        reference_sequence_id,
+        position,
+        Allele::new(reference).unwrap(),
+        [Allele::new(&b"G"[..]).unwrap()],
+        [1.0, 1.0],
+        [SampleLikelihood::observed(
+            Ploidy::new(2).unwrap(),
+            [40, 3, 0],
+            SampleEvidence::new(1, [0, 1], [0, 40]).unwrap(),
+        )
+        .unwrap()],
+    )
+    .unwrap()
+}
+
+fn write_indexed_likelihoods(
+    directory: &Path,
+    schema: LikelihoodVcfSchema,
+    sites: impl IntoIterator<Item = LikelihoodSite>,
+) -> PathBuf {
+    let path = directory.join("likelihoods.vcf.gz");
+    let mut writer = LikelihoodVariantWriter::new(
+        File::create(&path).unwrap(),
+        schema,
+        VariantOutputFormat::VcfBgzf,
+    )
+    .unwrap();
+    for site in sites {
+        writer.write_site(&site).unwrap();
+    }
+    writer.finish().unwrap();
+    let index = vcf::fs::index(&path).unwrap();
+    noodles::tabix::fs::write(format!("{}.tbi", path.display()), &index).unwrap();
+    path
 }
 
 struct RejectWrites;

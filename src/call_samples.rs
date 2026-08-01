@@ -4,8 +4,9 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::{
-    CallError, CallPloidy, LikelihoodVariantReader, PloidyDefinition, PloidyResolver, Result,
-    SamplePloidy, samples::validate_sample_name,
+    CallError, CallPloidy, IndexedLikelihoodVariantReader, LikelihoodVariantReader,
+    LikelihoodVcfSchema, PloidyDefinition, PloidyResolver, Result, SamplePloidy,
+    samples::validate_sample_name,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -108,6 +109,21 @@ impl CallSampleSelection {
     where
         R: Read,
     {
+        self.bind_reader(reader, definition)
+    }
+
+    pub fn bind_indexed(
+        self,
+        reader: IndexedLikelihoodVariantReader,
+        definition: &PloidyDefinition,
+    ) -> Result<(IndexedLikelihoodVariantReader, PloidyResolver)> {
+        self.bind_reader(reader, definition)
+    }
+
+    fn bind_reader<R>(self, reader: R, definition: &PloidyDefinition) -> Result<(R, PloidyResolver)>
+    where
+        R: ProjectLikelihoodSamples,
+    {
         match self.mode {
             SelectionMode::All => {
                 let resolver =
@@ -115,7 +131,7 @@ impl CallSampleSelection {
                 Ok((reader, resolver))
             }
             SelectionMode::Include(assignments) => {
-                let reader = reader.select_samples(assignments.iter().map(|item| &item.name))?;
+                let reader = reader.include(&assignments)?;
                 let mut default: Option<SamplePloidy> = None;
                 let mut ploidies = Vec::with_capacity(assignments.len());
                 for assignment in assignments {
@@ -136,7 +152,7 @@ impl CallSampleSelection {
                 Ok((reader, resolver))
             }
             SelectionMode::Exclude(names) => {
-                let reader = reader.exclude_samples(names.iter())?;
+                let reader = reader.exclude(&names)?;
                 let resolver =
                     definition.default_resolver(reader.schema().header().sample_names().len())?;
                 Ok((reader, resolver))
@@ -175,6 +191,43 @@ impl CallSampleSelection {
         } else {
             Self::include_with_ploidy(records)
         }
+    }
+}
+
+trait ProjectLikelihoodSamples: Sized {
+    fn schema(&self) -> &LikelihoodVcfSchema;
+    fn include(self, assignments: &[SampleAssignment]) -> Result<Self>;
+    fn exclude(self, names: &[Box<str>]) -> Result<Self>;
+}
+
+impl<R> ProjectLikelihoodSamples for LikelihoodVariantReader<R>
+where
+    R: Read,
+{
+    fn schema(&self) -> &LikelihoodVcfSchema {
+        self.schema()
+    }
+
+    fn include(self, assignments: &[SampleAssignment]) -> Result<Self> {
+        self.select_samples(assignments.iter().map(|item| &item.name))
+    }
+
+    fn exclude(self, names: &[Box<str>]) -> Result<Self> {
+        self.exclude_samples(names)
+    }
+}
+
+impl ProjectLikelihoodSamples for IndexedLikelihoodVariantReader {
+    fn schema(&self) -> &LikelihoodVcfSchema {
+        self.schema()
+    }
+
+    fn include(self, assignments: &[SampleAssignment]) -> Result<Self> {
+        self.select_samples(assignments.iter().map(|item| &item.name))
+    }
+
+    fn exclude(self, names: &[Box<str>]) -> Result<Self> {
+        self.exclude_samples(names)
     }
 }
 

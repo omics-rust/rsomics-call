@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -7,9 +8,10 @@ use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
     AlignmentInput, CallModel, CallSampleSelection, CalledVcfSchema, GvcfBlocker,
-    IndelLikelihoodConfig, LikelihoodCallRun, LikelihoodSite, LikelihoodVariantReader,
-    LikelihoodVcfSchema, MultiallelicCaller, MultiallelicCallerConfig, PloidyDefinition,
-    PloidyPreset, SamplePloidy, SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
+    IndelLikelihoodConfig, IndexedLikelihoodVariantReader, LikelihoodCallRun, LikelihoodSite,
+    LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, MultiallelicCallerConfig,
+    PloidyDefinition, PloidyPreset, SamplePloidy, SampleSelection, SnpLikelihoodConfig,
+    SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
 
@@ -437,6 +439,71 @@ fn call_workflow_matches_bcftools_1_24() {
             .collect::<Vec<_>>()
     };
     assert_eq!(records(&actual), records(&expected.stdout));
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn indexed_call_regions_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("indexed-call.vcf.gz");
+    let data = "##fileformat=VCFv4.2\n\
+                ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+                ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n\
+                ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+                ##contig=<ID=chr1,length=10>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tfirst\tsecond\tthird\n\
+                chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n\
+                chr1\t2\t.\tAAA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n\
+                chr1\t3\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n";
+    let mut writer = noodles::bgzf::io::Writer::new(File::create(&input).unwrap());
+    writer.write_all(data.as_bytes()).unwrap();
+    writer.finish().unwrap();
+    let index = vcf::fs::index(&input).unwrap();
+    noodles::tabix::fs::write(format!("{}.tbi", input.display()), &index).unwrap();
+
+    let expected = Command::new(bcftools())
+        .args([
+            "call",
+            "-m",
+            "-s",
+            "third,first",
+            "-r",
+            "chr1:2,chr1:4",
+            "-Ov",
+        ])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+
+    let definition = PloidyDefinition::preset(PloidyPreset::Diploid);
+    let (reader, resolver) = CallSampleSelection::include(["third", "first"])
+        .unwrap()
+        .bind_indexed(
+            IndexedLikelihoodVariantReader::open(&input).unwrap(),
+            &definition,
+        )
+        .unwrap();
+    let actual = LikelihoodCallRun::new(
+        CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+        resolver,
+    )
+    .run_indexed(
+        reader,
+        ["chr1:4-4", "chr1:2-2"].map(|region| region.parse().unwrap()),
+        Vec::new(),
+        rsomics_call::VariantOutputFormat::Vcf,
+    )
+    .unwrap();
+    assert_eq!(
+        sample_call_signature(&actual),
+        sample_call_signature(&expected.stdout)
+    );
 }
 
 fn sample_call_signature(data: &[u8]) -> (Vec<String>, Vec<Vec<(String, String)>>) {

@@ -1,7 +1,14 @@
 use std::collections::HashSet;
+use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
+use std::path::Path;
 
-use noodles::{bcf, bgzf, vcf, vcf::variant::io::Write as _};
+use noodles::{
+    bcf, bgzf,
+    core::{Position, Region},
+    vcf,
+    vcf::variant::{Record as _, io::Write as _},
+};
 use noodles_util::variant;
 
 use crate::{CallError, CalledSite, CalledVcfSchema, LikelihoodSite, LikelihoodVcfSchema, Result};
@@ -98,6 +105,173 @@ where
         }
         Ok(())
     }
+}
+
+pub struct IndexedLikelihoodVariantReader {
+    inner: variant::io::indexed_reader::IndexedReader<bgzf::io::Reader<File>>,
+    projection: LikelihoodProjection,
+}
+
+impl IndexedLikelihoodVariantReader {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let mut inner = variant::io::indexed_reader::Builder::default()
+            .build_from_path(path)
+            .map_err(|error| path_input_error(path, error))?;
+        let header = inner
+            .read_header()
+            .map_err(|error| path_input_error(path, error))?;
+        Ok(Self {
+            inner,
+            projection: LikelihoodProjection::new(header)?,
+        })
+    }
+
+    pub fn schema(&self) -> &LikelihoodVcfSchema {
+        self.projection.schema()
+    }
+
+    pub fn select_samples(
+        mut self,
+        samples: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self> {
+        self.projection.select_samples(samples)?;
+        Ok(self)
+    }
+
+    pub fn exclude_samples(
+        mut self,
+        samples: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self> {
+        self.projection.exclude_samples(samples)?;
+        Ok(self)
+    }
+
+    pub(crate) fn normalize_regions(
+        &self,
+        regions: impl IntoIterator<Item = Region>,
+    ) -> Result<Vec<VariantRegion>> {
+        normalize_variant_regions(self.projection.input_header(), regions)
+    }
+
+    pub(crate) fn visit_normalized_regions(
+        mut self,
+        regions: Vec<VariantRegion>,
+        mut visit: impl FnMut(u64, LikelihoodSite) -> Result<()>,
+    ) -> Result<()> {
+        let header = self.projection.input_header();
+        let mut record_number = 0;
+
+        for (region_index, region) in regions.iter().enumerate() {
+            let records = self
+                .inner
+                .query(header, &region.query)
+                .map_err(|error| query_error(&region.query, error))?;
+            for result in records {
+                record_number += 1;
+                let record = result.map_err(|error| record_error(record_number, error))?;
+                let record =
+                    vcf::variant::RecordBuf::try_from_variant_record(header, record.as_ref())
+                        .map_err(|error| record_error(record_number, error))?;
+                let start = record.variant_start().ok_or_else(|| {
+                    record_error(
+                        record_number,
+                        io::Error::new(io::ErrorKind::InvalidData, "missing variant position"),
+                    )
+                })?;
+                let end = record
+                    .variant_end(header)
+                    .map_err(|error| record_error(record_number, error))?;
+                if regions[..region_index]
+                    .iter()
+                    .any(|previous| previous.overlaps(region.reference_id, start, end))
+                {
+                    continue;
+                }
+                let site = self.projection.decode(&record).map_err(|error| {
+                    CallError::LikelihoodVariantRecord {
+                        record: record_number,
+                        message: error.to_string(),
+                    }
+                })?;
+                visit(record_number, site)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct VariantRegion {
+    query: Region,
+    reference_id: usize,
+    start: Position,
+    end: Position,
+}
+
+impl VariantRegion {
+    fn overlaps(&self, reference_id: usize, start: Position, end: Position) -> bool {
+        self.reference_id == reference_id && start <= self.end && end >= self.start
+    }
+}
+
+fn normalize_variant_regions(
+    header: &vcf::Header,
+    regions: impl IntoIterator<Item = Region>,
+) -> Result<Vec<VariantRegion>> {
+    let mut values = Vec::new();
+    for region in regions {
+        let name =
+            std::str::from_utf8(region.name().as_ref()).map_err(|_| CallError::InvalidRegion {
+                region: region.to_string(),
+                message: "reference sequence name is not UTF-8".to_owned(),
+            })?;
+        let (reference_id, _, contig) =
+            header
+                .contigs()
+                .get_full(name)
+                .ok_or_else(|| CallError::InvalidRegion {
+                    region: region.to_string(),
+                    message: "reference sequence is absent from the variant header".to_owned(),
+                })?;
+        let start = region.interval().start().unwrap_or(Position::MIN);
+        let end = match contig.length().and_then(Position::new) {
+            Some(length) if start > length => {
+                return Err(CallError::InvalidRegion {
+                    region: region.to_string(),
+                    message: "interval is outside the reference sequence".to_owned(),
+                });
+            }
+            Some(length) => region.interval().end().unwrap_or(length).min(length),
+            None => region.interval().end().unwrap_or(Position::MAX),
+        };
+        values.push((reference_id, name.to_owned(), start, end));
+    }
+    if values.is_empty() {
+        return Err(CallError::MissingRegions);
+    }
+    values.sort_unstable_by_key(|(reference_id, _, start, end)| (*reference_id, *start, *end));
+
+    let mut merged: Vec<(usize, String, Position, Position)> = Vec::with_capacity(values.len());
+    for (reference_id, name, start, end) in values {
+        if let Some((previous_id, _, _, previous_end)) = merged.last_mut()
+            && *previous_id == reference_id
+            && start <= previous_end.checked_add(1).unwrap_or(Position::MAX)
+        {
+            *previous_end = (*previous_end).max(end);
+        } else {
+            merged.push((reference_id, name, start, end));
+        }
+    }
+
+    Ok(merged
+        .into_iter()
+        .map(|(reference_id, name, start, end)| VariantRegion {
+            query: Region::new(name, start..=end),
+            reference_id,
+            start,
+            end,
+        })
+        .collect())
 }
 
 pub(crate) struct LikelihoodProjection {
@@ -334,6 +508,14 @@ where
 
 fn input_error(error: io::Error) -> CallError {
     CallError::LikelihoodVariantInput(error.to_string())
+}
+
+fn path_input_error(path: &Path, error: io::Error) -> CallError {
+    CallError::LikelihoodVariantInput(format!("{}: {error}", path.display()))
+}
+
+fn query_error(region: &Region, error: io::Error) -> CallError {
+    CallError::LikelihoodVariantInput(format!("querying region {region}: {error}"))
 }
 
 fn record_error(record: u64, error: io::Error) -> CallError {

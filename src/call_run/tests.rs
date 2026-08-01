@@ -1,4 +1,10 @@
-use crate::{PloidyDefinition, PloidyPreset, SamplePloidy, VariantOutputFormat};
+use std::fs::File;
+use std::io::Write;
+
+use crate::{
+    IndexedLikelihoodVariantReader, PloidyDefinition, PloidyPreset, SamplePloidy,
+    VariantOutputFormat,
+};
 
 use super::*;
 
@@ -102,4 +108,39 @@ fn runs_the_consensus_model_with_its_output_schema() {
         output.lines().filter(|line| !line.starts_with('#')).count(),
         2
     );
+}
+
+#[test]
+fn runs_calls_from_an_indexed_region() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("likelihoods.vcf.gz");
+    let mut writer = noodles::bgzf::io::Writer::new(File::create(&input).unwrap());
+    writer.write_all(INPUT).unwrap();
+    writer.finish().unwrap();
+    let index = noodles::vcf::fs::index(&input).unwrap();
+    noodles::tabix::fs::write(format!("{}.tbi", input.display()), &index).unwrap();
+
+    let reader = IndexedLikelihoodVariantReader::open(input).unwrap();
+    let ploidy = PloidyDefinition::preset(PloidyPreset::Diploid)
+        .default_resolver(1)
+        .unwrap();
+    let output = LikelihoodCallRun::new(
+        CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+        ploidy,
+    )
+    .run_indexed(
+        reader,
+        ["chr1:2-2".parse().unwrap()],
+        Vec::new(),
+        VariantOutputFormat::Vcf,
+    )
+    .unwrap();
+    let records = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].starts_with("chr1\t2\t"));
 }

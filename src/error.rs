@@ -76,10 +76,10 @@ pub enum CallError {
     #[error("reference dictionary in alignment input {0} differs from the first input")]
     ReferenceDictionaryMismatch(String),
 
-    #[error("invalid alignment region {region}: {message}")]
+    #[error("invalid region {region}: {message}")]
     InvalidRegion { region: String, message: String },
 
-    #[error("at least one alignment region is required")]
+    #[error("at least one region is required")]
     MissingRegions,
 
     #[error("target input {path}: {message}")]
