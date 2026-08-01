@@ -4,7 +4,7 @@ use rsomics_pileup::Column;
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, LikelihoodMatrix, LikelihoodSite, Nucleotide,
     Ploidy, Result, SampleEvidence, SampleLikelihood,
-    annotation::{AnnotationEvidence, AnnotationObservation, site_annotations},
+    annotation::{AnnotationEvidence, AnnotationObservation, CigarMetrics, site_annotations},
 };
 
 const NUCLEOTIDE: [Nucleotide; 16] = [
@@ -91,17 +91,24 @@ impl SnpEvidence {
     ) -> Result<Self> {
         let mut accumulator = SnpAccumulator::with_observations(std::mem::take(observations));
         for entry in column.entries() {
-            let cigar = entry
-                .cigar()
-                .map(|(kind, length)| (kind, length as usize))
-                .collect::<Vec<_>>();
             accumulator.push(
                 entry.record(),
                 entry.projection(),
-                &cigar,
+                CigarMetrics::new(entry.cigar()),
                 reference_base,
                 config,
             );
+        }
+        if accumulator.has_alternate(reference_base) {
+            for entry in column.entries() {
+                accumulator.observe_detailed(
+                    entry.record(),
+                    entry.projection(),
+                    CigarMetrics::new(entry.cigar()),
+                    reference_base,
+                    config,
+                );
+            }
         }
         let evidence = accumulator.finish(model)?;
         *observations = accumulator.observations;
@@ -155,7 +162,7 @@ impl SnpAccumulator {
         &mut self,
         record: &RawRecord,
         projection: &rsomics_pileup::PileupRead,
-        cigar: &[(u8, usize)],
+        cigar: CigarMetrics,
         reference_base: Nucleotide,
         config: SnpLikelihoodConfig,
     ) {
@@ -165,64 +172,49 @@ impl SnpAccumulator {
         }
         self.annotations.add_raw_depth();
 
-        let qualities = record.quality_scores();
-        let qpos = projection.qpos;
-        let quality = |index| {
-            if qualities.is_empty() {
-                u8::MAX
-            } else {
-                qualities[index]
-            }
-        };
-        let mut base_quality = u16::from(quality(qpos));
-        if qpos > 0 {
-            base_quality = base_quality
-                .min(u16::from(quality(qpos - 1)) + u16::from(config.neighboring_quality_delta));
-        }
-        if qpos + 1 < record.sequence_len() {
-            base_quality = base_quality
-                .min(u16::from(quality(qpos + 1)) + u16::from(config.neighboring_quality_delta));
-        }
-        if base_quality < u16::from(config.minimum_base_quality) {
+        let Some((base, observation)) =
+            accepted_observation(record, projection, reference_base, config)
+        else {
             return;
-        }
+        };
         self.depth += 1;
-        let base_quality =
-            u8::try_from(base_quality.min(u16::from(config.maximum_base_quality))).unwrap();
-        let raw_mapping_quality = match record.mapping_quality() {
-            255 => 20,
-            quality => quality,
-        };
-        let mapping_quality = raw_mapping_quality.min(config.mapping_quality_cap);
-        let effective_quality = base_quality.min(mapping_quality).clamp(4, 63);
-        let nibble = record.seq_nibble(qpos);
-        let base = if nibble == 0 {
-            reference_base
-        } else {
-            NUCLEOTIDE[usize::from(nibble)]
-        };
         if base != Nucleotide::N {
             self.allele_depths[base as usize] += 1;
-            self.quality_sums[base as usize] += u64::from(effective_quality);
+            self.quality_sums[base as usize] += u64::from(observation.effective_quality);
         }
-        self.annotations.observe(
-            record,
-            projection,
-            cigar,
-            AnnotationObservation {
-                allele: base as usize,
-                is_reference: base == reference_base,
-                base_quality,
-                raw_mapping_quality,
-                mapping_quality,
-                effective_quality,
-            },
-        );
+        self.annotations.observe(record, projection, observation);
         self.observations.push(BaseObservation::new(
             base,
-            effective_quality,
+            observation.effective_quality,
             record.flags() & 0x10 != 0,
         ));
+    }
+
+    fn observe_detailed(
+        &mut self,
+        record: &RawRecord,
+        projection: &rsomics_pileup::PileupRead,
+        cigar: CigarMetrics,
+        reference_base: Nucleotide,
+        config: SnpLikelihoodConfig,
+    ) {
+        if projection.is_deletion || projection.is_reference_skip {
+            return;
+        }
+        if let Some((_, observation)) =
+            accepted_observation(record, projection, reference_base, config)
+        {
+            self.annotations
+                .observe_detailed(record, projection, cigar, observation);
+        }
+    }
+
+    fn has_alternate(&self, reference_base: Nucleotide) -> bool {
+        self.allele_depths
+            .iter()
+            .take(4)
+            .enumerate()
+            .any(|(index, &depth)| index != reference_base as usize && depth != 0)
     }
 
     fn finish(&mut self, model: &mut ErrorModel) -> Result<SnpEvidence> {
@@ -236,10 +228,65 @@ impl SnpAccumulator {
     }
 }
 
+fn accepted_observation(
+    record: &RawRecord,
+    projection: &rsomics_pileup::PileupRead,
+    reference_base: Nucleotide,
+    config: SnpLikelihoodConfig,
+) -> Option<(Nucleotide, AnnotationObservation)> {
+    let qualities = record.quality_scores();
+    let qpos = projection.qpos;
+    let quality = |index| {
+        if qualities.is_empty() {
+            u8::MAX
+        } else {
+            qualities[index]
+        }
+    };
+    let mut base_quality = u16::from(quality(qpos));
+    if qpos > 0 {
+        base_quality = base_quality
+            .min(u16::from(quality(qpos - 1)) + u16::from(config.neighboring_quality_delta));
+    }
+    if qpos + 1 < record.sequence_len() {
+        base_quality = base_quality
+            .min(u16::from(quality(qpos + 1)) + u16::from(config.neighboring_quality_delta));
+    }
+    if base_quality < u16::from(config.minimum_base_quality) {
+        return None;
+    }
+    let base_quality =
+        u8::try_from(base_quality.min(u16::from(config.maximum_base_quality))).unwrap();
+    let raw_mapping_quality = match record.mapping_quality() {
+        255 => 20,
+        quality => quality,
+    };
+    let mapping_quality = raw_mapping_quality.min(config.mapping_quality_cap);
+    let effective_quality = base_quality.min(mapping_quality).clamp(4, 63);
+    let nibble = record.seq_nibble(qpos);
+    let base = if nibble == 0 {
+        reference_base
+    } else {
+        NUCLEOTIDE[usize::from(nibble)]
+    };
+    Some((
+        base,
+        AnnotationObservation {
+            allele: base as usize,
+            is_reference: base == reference_base,
+            base_quality,
+            raw_mapping_quality,
+            mapping_quality,
+            effective_quality,
+        },
+    ))
+}
+
 pub struct SnpSiteBuilder {
     config: SnpLikelihoodConfig,
     model: ErrorModel,
     samples: Vec<SnpAccumulator>,
+    entry_samples: Vec<Option<usize>>,
 }
 
 impl SnpSiteBuilder {
@@ -253,6 +300,7 @@ impl SnpSiteBuilder {
             samples: std::iter::repeat_with(SnpAccumulator::default)
                 .take(sample_count)
                 .collect(),
+            entry_samples: Vec::new(),
         })
     }
 
@@ -265,8 +313,11 @@ impl SnpSiteBuilder {
         for sample in &mut self.samples {
             sample.clear();
         }
+        self.entry_samples.clear();
         for entry in column.entries() {
-            let Some(index) = sample_index(entry.source_id(), entry.record())? else {
+            let index = sample_index(entry.source_id(), entry.record())?;
+            self.entry_samples.push(index);
+            let Some(index) = index else {
                 continue;
             };
             let count = self.samples.len();
@@ -274,17 +325,32 @@ impl SnpSiteBuilder {
                 .samples
                 .get_mut(index)
                 .ok_or(CallError::InvalidSampleIndex { index, count })?;
-            let cigar = entry
-                .cigar()
-                .map(|(kind, length)| (kind, length as usize))
-                .collect::<Vec<_>>();
             sample.push(
                 entry.record(),
                 entry.projection(),
-                &cigar,
+                CigarMetrics::new(entry.cigar()),
                 reference_base,
                 self.config,
             );
+        }
+
+        if self
+            .samples
+            .iter()
+            .any(|sample| sample.has_alternate(reference_base))
+        {
+            for (entry, &sample) in column.entries().zip(&self.entry_samples) {
+                let Some(sample) = sample else {
+                    continue;
+                };
+                self.samples[sample].observe_detailed(
+                    entry.record(),
+                    entry.projection(),
+                    CigarMetrics::new(entry.cigar()),
+                    reference_base,
+                    self.config,
+                );
+            }
         }
 
         let model = &mut self.model;

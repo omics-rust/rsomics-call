@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use rsomics_bamio::raw::RawRecord;
 use rsomics_pileup::PileupRead;
 
@@ -8,7 +10,59 @@ const POSITION_BINS: usize = 100;
 const QUALITY_BINS: usize = 60;
 const MISMATCH_BINS: usize = 32;
 const REVERSE: u16 = 0x10;
+const EMPTY_POSITION_BINS: [u64; POSITION_BINS] = [0; POSITION_BINS];
+const EMPTY_QUALITY_BINS: [u64; QUALITY_BINS] = [0; QUALITY_BINS];
+static ERROR_PROBABILITIES: LazyLock<[f64; 64]> =
+    LazyLock::new(|| std::array::from_fn(|quality| 10.0f64.powf(-0.1 * quality as f64)));
 
+#[derive(Clone, Copy)]
+pub(crate) struct CigarMetrics {
+    left_soft_clip: usize,
+    right_soft_clip: usize,
+    has_soft_clip: bool,
+    mismatch_adjustment: i64,
+}
+
+impl CigarMetrics {
+    pub(crate) fn new(cigar: impl IntoIterator<Item = (u8, u32)>) -> Self {
+        let mut left_soft_clip = 0;
+        let mut right_soft_clip = 0;
+        let mut has_core = false;
+        let mut has_soft_clip = false;
+        let mut mismatch_adjustment = 0;
+        for (kind, length) in cigar {
+            let length_usize = length as usize;
+            match kind {
+                4 => {
+                    has_soft_clip = true;
+                    mismatch_adjustment += i64::from(length);
+                    if !has_core {
+                        left_soft_clip += length_usize;
+                    }
+                    right_soft_clip += length_usize;
+                }
+                5 => {}
+                1 | 2 => {
+                    has_core = true;
+                    right_soft_clip = 0;
+                    mismatch_adjustment -= i64::from(length.saturating_sub(1));
+                }
+                _ => {
+                    has_core = true;
+                    right_soft_clip = 0;
+                }
+            }
+        }
+        Self {
+            left_soft_clip,
+            right_soft_clip,
+            has_soft_clip,
+            mismatch_adjustment,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct AnnotationObservation {
     pub(crate) allele: usize,
     pub(crate) is_reference: bool,
@@ -24,6 +78,14 @@ pub(crate) struct AnnotationEvidence {
     reverse: [u64; ALLELE_COUNT],
     error_sums: [f64; ALLELE_COUNT],
     auxiliary: [u64; 16],
+    detailed: Option<Box<DetailedAnnotationEvidence>>,
+    raw_depth: u64,
+    zero_mapping_quality: u64,
+    soft_clipped_reads: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DetailedAnnotationEvidence {
     reference_positions: [u64; POSITION_BINS],
     alternate_positions: [u64; POSITION_BINS],
     reference_mapping_qualities: [u64; QUALITY_BINS],
@@ -44,18 +106,11 @@ pub(crate) struct AnnotationEvidence {
     alternate_mismatches: [u64; MISMATCH_BINS],
     mismatch_sums: [u64; 2],
     mismatch_counts: [u64; 2],
-    raw_depth: u64,
-    zero_mapping_quality: u64,
-    soft_clipped_reads: u64,
 }
 
-impl Default for AnnotationEvidence {
+impl Default for DetailedAnnotationEvidence {
     fn default() -> Self {
         Self {
-            forward: [0; ALLELE_COUNT],
-            reverse: [0; ALLELE_COUNT],
-            error_sums: [0.0; ALLELE_COUNT],
-            auxiliary: [0; 16],
             reference_positions: [0; POSITION_BINS],
             alternate_positions: [0; POSITION_BINS],
             reference_mapping_qualities: [0; QUALITY_BINS],
@@ -76,6 +131,18 @@ impl Default for AnnotationEvidence {
             alternate_mismatches: [0; MISMATCH_BINS],
             mismatch_sums: [0; 2],
             mismatch_counts: [0; 2],
+        }
+    }
+}
+
+impl Default for AnnotationEvidence {
+    fn default() -> Self {
+        Self {
+            forward: [0; ALLELE_COUNT],
+            reverse: [0; ALLELE_COUNT],
+            error_sums: [0.0; ALLELE_COUNT],
+            auxiliary: [0; 16],
+            detailed: None,
             raw_depth: 0,
             zero_mapping_quality: 0,
             soft_clipped_reads: 0,
@@ -85,11 +152,18 @@ impl Default for AnnotationEvidence {
 
 impl AnnotationEvidence {
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        self.forward.fill(0);
+        self.reverse.fill(0);
+        self.error_sums.fill(0.0);
+        self.auxiliary.fill(0);
+        self.raw_depth = 0;
+        self.zero_mapping_quality = 0;
+        self.soft_clipped_reads = 0;
+        self.detailed = None;
     }
 
-    pub(crate) fn begin_read(&mut self, cigar: &[(u8, usize)]) {
-        if cigar.iter().any(|&(kind, _)| kind == 4) {
+    pub(crate) fn begin_read(&mut self, cigar: CigarMetrics) {
+        if cigar.has_soft_clip {
             self.soft_clipped_reads += 1;
         }
     }
@@ -107,20 +181,23 @@ impl AnnotationEvidence {
         &mut self,
         record: &RawRecord,
         projection: &PileupRead,
-        cigar: &[(u8, usize)],
+        cigar: CigarMetrics,
     ) {
+        let detailed = self
+            .detailed
+            .get_or_insert_with(|| Box::new(DetailedAnnotationEvidence::default()));
         let geometry = ReadGeometry::new(record.sequence_len(), projection.qpos, cigar);
         let position = geometry.position_bin();
         let soft_clip = geometry.soft_clip_bin();
         let mapping_quality = usize::from(record.mapping_quality().min(59));
         if projection.indel == 0 {
-            self.indel_reference_positions[position] += 1;
-            self.indel_reference_mapping_qualities[mapping_quality] += 1;
-            self.indel_reference_soft_clips[soft_clip] += 1;
+            detailed.indel_reference_positions[position] += 1;
+            detailed.indel_reference_mapping_qualities[mapping_quality] += 1;
+            detailed.indel_reference_soft_clips[soft_clip] += 1;
         } else {
-            self.indel_alternate_positions[position] += 1;
-            self.indel_alternate_mapping_qualities[mapping_quality] += 1;
-            self.indel_alternate_soft_clips[soft_clip] += 1;
+            detailed.indel_alternate_positions[position] += 1;
+            detailed.indel_alternate_mapping_qualities[mapping_quality] += 1;
+            detailed.indel_alternate_soft_clips[soft_clip] += 1;
         }
     }
 
@@ -128,7 +205,6 @@ impl AnnotationEvidence {
         &mut self,
         record: &RawRecord,
         projection: &PileupRead,
-        cigar: &[(u8, usize)],
         observation: AnnotationObservation,
     ) {
         let AnnotationObservation {
@@ -146,7 +222,7 @@ impl AnnotationEvidence {
             } else {
                 self.forward[allele] += 1;
             }
-            self.error_sums[allele] += 10.0f64.powf(-0.1 * f64::from(effective_quality));
+            self.error_sums[allele] += ERROR_PROBABILITIES[usize::from(effective_quality)];
         }
 
         let difference = usize::from(!is_reference);
@@ -167,35 +243,55 @@ impl AnnotationEvidence {
         if raw_mapping_quality == 0 {
             self.zero_mapping_quality += 1;
         }
+    }
+
+    pub(crate) fn observe_detailed(
+        &mut self,
+        record: &RawRecord,
+        projection: &PileupRead,
+        cigar: CigarMetrics,
+        observation: AnnotationObservation,
+    ) {
+        let detailed = self
+            .detailed
+            .get_or_insert_with(|| Box::new(DetailedAnnotationEvidence::default()));
+        let AnnotationObservation {
+            is_reference,
+            base_quality,
+            mapping_quality,
+            ..
+        } = observation;
+        let reverse = record.flags() & REVERSE != 0;
+        let difference = usize::from(!is_reference);
         let geometry = ReadGeometry::new(record.sequence_len(), projection.qpos, cigar);
         let position = geometry.position_bin();
         let soft_clip = geometry.soft_clip_bin();
         let base_quality_bin = usize::from(base_quality.min(59));
         let mapping_quality_bin = usize::from(mapping_quality.min(59));
         if is_reference {
-            self.reference_positions[position] += 1;
-            self.reference_mapping_qualities[mapping_quality_bin] += 1;
-            self.reference_base_qualities[base_quality_bin] += 1;
-            self.reference_soft_clips[soft_clip] += 1;
+            detailed.reference_positions[position] += 1;
+            detailed.reference_mapping_qualities[mapping_quality_bin] += 1;
+            detailed.reference_base_qualities[base_quality_bin] += 1;
+            detailed.reference_soft_clips[soft_clip] += 1;
         } else {
-            self.alternate_positions[position] += 1;
-            self.alternate_mapping_qualities[mapping_quality_bin] += 1;
-            self.alternate_base_qualities[base_quality_bin] += 1;
-            self.alternate_soft_clips[soft_clip] += 1;
+            detailed.alternate_positions[position] += 1;
+            detailed.alternate_mapping_qualities[mapping_quality_bin] += 1;
+            detailed.alternate_base_qualities[base_quality_bin] += 1;
+            detailed.alternate_soft_clips[soft_clip] += 1;
         }
         if reverse {
-            self.reverse_mapping_qualities[mapping_quality_bin] += 1;
+            detailed.reverse_mapping_qualities[mapping_quality_bin] += 1;
         } else {
-            self.forward_mapping_qualities[mapping_quality_bin] += 1;
+            detailed.forward_mapping_qualities[mapping_quality_bin] += 1;
         }
 
         if let Some(mismatches) = mismatch_count(record, cigar, is_reference) {
-            self.mismatch_sums[difference] += mismatches as u64;
-            self.mismatch_counts[difference] += 1;
+            detailed.mismatch_sums[difference] += mismatches as u64;
+            detailed.mismatch_counts[difference] += 1;
             if is_reference {
-                self.reference_mismatches[mismatches] += 1;
+                detailed.reference_mismatches[mismatches] += 1;
             } else {
-                self.alternate_mismatches[mismatches] += 1;
+                detailed.alternate_mismatches[mismatches] += 1;
             }
         }
     }
@@ -262,78 +358,81 @@ pub(crate) fn site_annotations<'a>(
 ) -> Result<SiteAnnotations> {
     let evidence = evidence.into_iter().collect::<Vec<_>>();
     let mut total = AnnotationEvidence::default();
+    let mut detailed = has_alternate.then(DetailedAnnotationEvidence::default);
     for sample in &evidence {
         add_arrays(&mut total.forward, &sample.forward);
         add_arrays(&mut total.reverse, &sample.reverse);
         add_arrays(&mut total.auxiliary, &sample.auxiliary);
-        add_arrays(&mut total.reference_positions, &sample.reference_positions);
-        add_arrays(&mut total.alternate_positions, &sample.alternate_positions);
-        add_arrays(
-            &mut total.reference_mapping_qualities,
-            &sample.reference_mapping_qualities,
-        );
-        add_arrays(
-            &mut total.alternate_mapping_qualities,
-            &sample.alternate_mapping_qualities,
-        );
-        add_arrays(
-            &mut total.reference_base_qualities,
-            &sample.reference_base_qualities,
-        );
-        add_arrays(
-            &mut total.alternate_base_qualities,
-            &sample.alternate_base_qualities,
-        );
-        add_arrays(
-            &mut total.forward_mapping_qualities,
-            &sample.forward_mapping_qualities,
-        );
-        add_arrays(
-            &mut total.reverse_mapping_qualities,
-            &sample.reverse_mapping_qualities,
-        );
-        add_arrays(
-            &mut total.reference_soft_clips,
-            &sample.reference_soft_clips,
-        );
-        add_arrays(
-            &mut total.alternate_soft_clips,
-            &sample.alternate_soft_clips,
-        );
-        add_arrays(
-            &mut total.indel_reference_positions,
-            &sample.indel_reference_positions,
-        );
-        add_arrays(
-            &mut total.indel_alternate_positions,
-            &sample.indel_alternate_positions,
-        );
-        add_arrays(
-            &mut total.indel_reference_mapping_qualities,
-            &sample.indel_reference_mapping_qualities,
-        );
-        add_arrays(
-            &mut total.indel_alternate_mapping_qualities,
-            &sample.indel_alternate_mapping_qualities,
-        );
-        add_arrays(
-            &mut total.indel_reference_soft_clips,
-            &sample.indel_reference_soft_clips,
-        );
-        add_arrays(
-            &mut total.indel_alternate_soft_clips,
-            &sample.indel_alternate_soft_clips,
-        );
-        add_arrays(
-            &mut total.reference_mismatches,
-            &sample.reference_mismatches,
-        );
-        add_arrays(
-            &mut total.alternate_mismatches,
-            &sample.alternate_mismatches,
-        );
-        add_arrays(&mut total.mismatch_sums, &sample.mismatch_sums);
-        add_arrays(&mut total.mismatch_counts, &sample.mismatch_counts);
+        if let (Some(total), Some(sample)) = (&mut detailed, sample.detailed.as_deref()) {
+            add_arrays(&mut total.reference_positions, &sample.reference_positions);
+            add_arrays(&mut total.alternate_positions, &sample.alternate_positions);
+            add_arrays(
+                &mut total.reference_mapping_qualities,
+                &sample.reference_mapping_qualities,
+            );
+            add_arrays(
+                &mut total.alternate_mapping_qualities,
+                &sample.alternate_mapping_qualities,
+            );
+            add_arrays(
+                &mut total.reference_base_qualities,
+                &sample.reference_base_qualities,
+            );
+            add_arrays(
+                &mut total.alternate_base_qualities,
+                &sample.alternate_base_qualities,
+            );
+            add_arrays(
+                &mut total.forward_mapping_qualities,
+                &sample.forward_mapping_qualities,
+            );
+            add_arrays(
+                &mut total.reverse_mapping_qualities,
+                &sample.reverse_mapping_qualities,
+            );
+            add_arrays(
+                &mut total.reference_soft_clips,
+                &sample.reference_soft_clips,
+            );
+            add_arrays(
+                &mut total.alternate_soft_clips,
+                &sample.alternate_soft_clips,
+            );
+            add_arrays(
+                &mut total.indel_reference_positions,
+                &sample.indel_reference_positions,
+            );
+            add_arrays(
+                &mut total.indel_alternate_positions,
+                &sample.indel_alternate_positions,
+            );
+            add_arrays(
+                &mut total.indel_reference_mapping_qualities,
+                &sample.indel_reference_mapping_qualities,
+            );
+            add_arrays(
+                &mut total.indel_alternate_mapping_qualities,
+                &sample.indel_alternate_mapping_qualities,
+            );
+            add_arrays(
+                &mut total.indel_reference_soft_clips,
+                &sample.indel_reference_soft_clips,
+            );
+            add_arrays(
+                &mut total.indel_alternate_soft_clips,
+                &sample.indel_alternate_soft_clips,
+            );
+            add_arrays(
+                &mut total.reference_mismatches,
+                &sample.reference_mismatches,
+            );
+            add_arrays(
+                &mut total.alternate_mismatches,
+                &sample.alternate_mismatches,
+            );
+            add_arrays(&mut total.mismatch_sums, &sample.mismatch_sums);
+            add_arrays(&mut total.mismatch_counts, &sample.mismatch_counts);
+        }
         total.raw_depth += sample.raw_depth;
         total.zero_mapping_quality += sample.zero_mapping_quality;
         total.soft_clipped_reads += sample.soft_clipped_reads;
@@ -354,54 +453,70 @@ pub(crate) fn site_annotations<'a>(
         )
         .0 as f32
     });
-    let average_mismatches = (has_alternate
-        && (total.mismatch_counts[0] != 0 || total.mismatch_counts[1] != 0))
-        .then(|| {
+    let detailed = detailed.as_ref();
+    let average_mismatches = detailed
+        .filter(|values| values.mismatch_counts[0] != 0 || values.mismatch_counts[1] != 0)
+        .map(|values| {
             [
-                if total.mismatch_counts[0] == 0 {
+                if values.mismatch_counts[0] == 0 {
                     0.0
                 } else {
-                    total.mismatch_sums[0] as f32 / total.mismatch_counts[0] as f32
+                    values.mismatch_sums[0] as f32 / values.mismatch_counts[0] as f32
                 },
-                if total.mismatch_counts[1] == 0 {
+                if values.mismatch_counts[1] == 0 {
                     0.0
                 } else {
-                    total.mismatch_sums[1] as f32 / total.mismatch_counts[1] as f32
+                    values.mismatch_sums[1] as f32 / values.mismatch_counts[1] as f32
                 },
             ]
         });
     let (reference_positions, alternate_positions) = if indel {
-        (
-            &total.indel_reference_positions,
-            &total.indel_alternate_positions,
-        )
+        detailed.map_or((&EMPTY_POSITION_BINS, &EMPTY_POSITION_BINS), |detailed| {
+            (
+                &detailed.indel_reference_positions,
+                &detailed.indel_alternate_positions,
+            )
+        })
     } else {
-        (&total.reference_positions, &total.alternate_positions)
+        detailed.map_or((&EMPTY_POSITION_BINS, &EMPTY_POSITION_BINS), |detailed| {
+            (&detailed.reference_positions, &detailed.alternate_positions)
+        })
     };
     let (reference_mapping_qualities, alternate_mapping_qualities) = if indel {
-        (
-            &total.indel_reference_mapping_qualities,
-            &total.indel_alternate_mapping_qualities,
-        )
+        detailed.map_or((&EMPTY_QUALITY_BINS, &EMPTY_QUALITY_BINS), |detailed| {
+            (
+                &detailed.indel_reference_mapping_qualities,
+                &detailed.indel_alternate_mapping_qualities,
+            )
+        })
     } else {
-        (
-            &total.reference_mapping_qualities,
-            &total.alternate_mapping_qualities,
-        )
+        detailed.map_or((&EMPTY_QUALITY_BINS, &EMPTY_QUALITY_BINS), |detailed| {
+            (
+                &detailed.reference_mapping_qualities,
+                &detailed.alternate_mapping_qualities,
+            )
+        })
     };
     let (reference_soft_clips, alternate_soft_clips) = if indel {
-        (
-            &total.indel_reference_soft_clips,
-            &total.indel_alternate_soft_clips,
-        )
+        detailed.map_or((&EMPTY_POSITION_BINS, &EMPTY_POSITION_BINS), |detailed| {
+            (
+                &detailed.indel_reference_soft_clips,
+                &detailed.indel_alternate_soft_clips,
+            )
+        })
     } else {
-        (&total.reference_soft_clips, &total.alternate_soft_clips)
+        detailed.map_or((&EMPTY_POSITION_BINS, &EMPTY_POSITION_BINS), |detailed| {
+            (
+                &detailed.reference_soft_clips,
+                &detailed.alternate_soft_clips,
+            )
+        })
     };
     SiteAnnotations::new(SiteAnnotationValues {
         raw_depth: checked_u32(total.raw_depth)?,
         auxiliary: total.auxiliary.map(|value| value as f32),
         variant_distance_bias: has_alternate
-            .then(|| variant_distance_bias(&total.alternate_positions))
+            .then(|| detailed.and_then(|values| variant_distance_bias(&values.alternate_positions)))
             .flatten()
             .map(|value| value as f32),
         read_position_bias: has_alternate
@@ -417,25 +532,35 @@ pub(crate) fn site_annotations<'a>(
         } else if indel {
             Some(0.0)
         } else {
-            mann_whitney_z(
-                &total.reference_base_qualities,
-                &total.alternate_base_qualities,
-            )
-            .map(|value| value as f32)
+            detailed
+                .and_then(|values| {
+                    mann_whitney_z(
+                        &values.reference_base_qualities,
+                        &values.alternate_base_qualities,
+                    )
+                })
+                .map(|value| value as f32)
         },
         mapping_quality_strand_bias: if !has_alternate {
             None
         } else if indel {
             Some(0.0)
         } else {
-            mann_whitney_z(
-                &total.forward_mapping_qualities,
-                &total.reverse_mapping_qualities,
-            )
-            .map(|value| value as f32)
+            detailed
+                .and_then(|values| {
+                    mann_whitney_z(
+                        &values.forward_mapping_qualities,
+                        &values.reverse_mapping_qualities,
+                    )
+                })
+                .map(|value| value as f32)
         },
         mismatch_bias: has_alternate
-            .then(|| mann_whitney_z(&total.reference_mismatches, &total.alternate_mismatches))
+            .then(|| {
+                detailed.and_then(|values| {
+                    mann_whitney_z(&values.reference_mismatches, &values.alternate_mismatches)
+                })
+            })
             .flatten()
             .map(|value| value as f32),
         soft_clip_bias: has_alternate
@@ -481,20 +606,9 @@ struct ReadGeometry {
 }
 
 impl ReadGeometry {
-    fn new(sequence_length: usize, qpos: usize, cigar: &[(u8, usize)]) -> Self {
-        let left = cigar
-            .iter()
-            .skip_while(|(kind, _)| *kind == 5)
-            .take_while(|(kind, _)| *kind == 4)
-            .map(|(_, length)| *length)
-            .sum::<usize>();
-        let right = cigar
-            .iter()
-            .rev()
-            .skip_while(|(kind, _)| *kind == 5)
-            .take_while(|(kind, _)| *kind == 4)
-            .map(|(_, length)| *length)
-            .sum::<usize>();
+    fn new(sequence_length: usize, qpos: usize, cigar: CigarMetrics) -> Self {
+        let left = cigar.left_soft_clip;
+        let right = cigar.right_soft_clip;
         let left_distance = qpos + 1 - left;
         let right_distance = sequence_length - right - qpos;
         let clip = match (left != 0, right != 0) {
@@ -521,7 +635,7 @@ impl ReadGeometry {
     }
 }
 
-fn mismatch_count(record: &RawRecord, cigar: &[(u8, usize)], is_reference: bool) -> Option<usize> {
+fn mismatch_count(record: &RawRecord, cigar: CigarMetrics, is_reference: bool) -> Option<usize> {
     let value = record.aux_value(*b"NM")?;
     let mut mismatches = match record.aux_type(*b"NM")? {
         b'c' => i64::from(i8::from_le_bytes(value.try_into().ok()?)),
@@ -532,14 +646,7 @@ fn mismatch_count(record: &RawRecord, cigar: &[(u8, usize)], is_reference: bool)
         b'I' => i64::from(u32::from_le_bytes(value.try_into().ok()?)),
         _ => return None,
     };
-    for &(kind, length) in cigar {
-        let length = i64::try_from(length).ok()?;
-        match kind {
-            4 => mismatches += length,
-            1 | 2 if length > 1 => mismatches -= length - 1,
-            _ => {}
-        }
-    }
+    mismatches += cigar.mismatch_adjustment;
     mismatches -= if is_reference { 1 } else { 2 };
     Some(mismatches.clamp(0, (MISMATCH_BINS - 1) as i64) as usize)
 }

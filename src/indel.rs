@@ -6,7 +6,7 @@ use rsomics_pileup::{Column, PileupRead};
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, IndelSummary, LikelihoodMatrix, LikelihoodSite,
     Nucleotide, Ploidy, Result, SampleEvidence, SampleLikelihood,
-    annotation::{AnnotationEvidence, AnnotationObservation, site_annotations},
+    annotation::{AnnotationEvidence, AnnotationObservation, CigarMetrics, site_annotations},
     glocal,
 };
 
@@ -174,6 +174,9 @@ impl IndelSiteBuilder {
         if position >= reference_length {
             return Ok(None);
         }
+        if !column.entries().any(|entry| entry.projection().indel != 0) {
+            return Ok(None);
+        }
 
         let mut reads = Vec::with_capacity(column.len());
         for entry in column.entries() {
@@ -186,6 +189,7 @@ impl IndelSiteBuilder {
                     count: self.sample_count,
                 });
             }
+            let cigar_metrics = CigarMetrics::new(entry.cigar());
             let cigar = entry
                 .cigar()
                 .map(|(kind, length)| (kind, length as usize))
@@ -196,6 +200,7 @@ impl IndelSiteBuilder {
                 sample,
                 query_len: query_len(&cigar)?,
                 cigar,
+                cigar_metrics,
                 assigned_type: 0,
                 sequence_quality: 0,
                 indel_quality: 0,
@@ -363,8 +368,12 @@ impl IndelSiteBuilder {
                 .filter(|read| read.sample == sample && !read.projection.is_reference_skip)
                 .count();
             for read in reads.iter().filter(|read| read.sample == sample) {
-                annotations.begin_read(&read.cigar);
-                annotations.observe_indel_candidate(read.record, read.projection, &read.cigar);
+                annotations.begin_read(read.cigar_metrics);
+                annotations.observe_indel_candidate(
+                    read.record,
+                    read.projection,
+                    read.cigar_metrics,
+                );
                 if read.projection.is_reference_skip {
                     continue;
                 }
@@ -417,18 +426,20 @@ impl IndelSiteBuilder {
                     reverse_depths[allele] += 1;
                 }
                 quality_sums[allele] += u64::from(quality);
-                annotations.observe(
+                let observation = AnnotationObservation {
+                    allele,
+                    is_reference: allele == 0,
+                    base_quality: original_sequence_quality,
+                    raw_mapping_quality,
+                    mapping_quality,
+                    effective_quality: quality,
+                };
+                annotations.observe(read.record, read.projection, observation);
+                annotations.observe_detailed(
                     read.record,
                     read.projection,
-                    &read.cigar,
-                    AnnotationObservation {
-                        allele,
-                        is_reference: allele == 0,
-                        base_quality: original_sequence_quality,
-                        raw_mapping_quality,
-                        mapping_quality,
-                        effective_quality: quality,
-                    },
+                    read.cigar_metrics,
+                    observation,
                 );
                 self.observations.push(BaseObservation::new(
                     allele_nucleotide(allele),
@@ -519,6 +530,7 @@ struct Read<'a> {
     projection: &'a PileupRead,
     sample: usize,
     cigar: Vec<(u8, usize)>,
+    cigar_metrics: CigarMetrics,
     query_len: usize,
     assigned_type: usize,
     sequence_quality: u8,

@@ -215,10 +215,17 @@ impl SampleMap {
     }
 
     pub fn sample_index(&self, source_id: u32, record: &RawRecord) -> Result<Option<usize>> {
-        let source = self
-            .sources
-            .get(&source_id)
-            .ok_or(CallError::UnknownAlignmentSource(source_id))?;
+        let source = if self.sources.len() == 1 {
+            let (&expected, source) = self.sources.iter().next().unwrap();
+            if source_id != expected {
+                return Err(CallError::UnknownAlignmentSource(source_id));
+            }
+            source
+        } else {
+            self.sources
+                .get(&source_id)
+                .ok_or(CallError::UnknownAlignmentSource(source_id))?
+        };
         if source.default.is_some() {
             return Ok(source.default);
         }
