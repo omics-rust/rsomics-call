@@ -25,7 +25,7 @@ mod stream;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use call_annotation::CalledAnnotations;
-pub use call_run::{CallModel, LikelihoodCallRun, run_likelihood_calls};
+pub use call_run::{CallModel, CallOutputOptions, LikelihoodCallRun, run_likelihood_calls};
 pub use call_samples::CallSampleSelection;
 pub use called::{CallPloidy, CalledSample, CalledSite, GvcfSite};
 pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};

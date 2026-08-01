@@ -25,6 +25,20 @@ const INPUT_WITHOUT_DP: &[u8] = b"##fileformat=VCFv4.2\n\
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n\
 chr1\t1\t.\tA\t<*>\t.\t.\tQS=1,0\tPL\t0,100,200\n";
 
+const FILTER_INPUT: &[u8] = b"##fileformat=VCFv4.2\n\
+##contig=<ID=chr1,length=10>\n\
+##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+##INFO=<ID=INDEL,Number=0,Type=Flag,Description=\"Indel likelihood\">\n\
+##INFO=<ID=IDV,Number=1,Type=Integer,Description=\"Indel support\">\n\
+##INFO=<ID=IMF,Number=1,Type=Float,Description=\"Indel fraction\">\n\
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Likelihoods\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n\
+chr1\t1\t.\tA\t<*>\t.\t.\tQS=1,0\tPL:DP\t0,100,200:10\n\
+chr1\t2\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n\
+chr1\t3\t.\tN\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n\
+chr1\t4\t.\tA\tAT,<*>\t.\t.\tINDEL;IDV=2;IMF=1;QS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n";
+
 #[test]
 fn composes_ploidy_calling_gvcf_and_output() {
     let reader = LikelihoodVariantReader::new(INPUT).unwrap();
@@ -108,6 +122,47 @@ fn runs_the_consensus_model_with_its_output_schema() {
     assert_eq!(
         output.lines().filter(|line| !line.starts_with('#')).count(),
         2
+    );
+}
+
+#[test]
+fn applies_call_site_output_policy() {
+    let positions = |options| {
+        let reader = LikelihoodVariantReader::new(FILTER_INPUT).unwrap();
+        let ploidy = PloidyDefinition::preset(PloidyPreset::Diploid)
+            .default_resolver(1)
+            .unwrap();
+        let output = LikelihoodCallRun::new(
+            CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+            ploidy,
+        )
+        .with_output_options(options)
+        .run(reader, Vec::new(), VariantOutputFormat::Vcf)
+        .unwrap();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| line.split('\t').nth(1).unwrap().parse::<u64>().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(positions(CallOutputOptions::default()), [1, 2, 4]);
+    assert_eq!(
+        positions(CallOutputOptions::default().with_variants_only(true)),
+        [2, 4]
+    );
+    assert_eq!(
+        positions(CallOutputOptions::default().with_skip_snps(true)),
+        [4]
+    );
+    assert_eq!(
+        positions(CallOutputOptions::default().with_skip_indels(true)),
+        [1, 2]
+    );
+    assert_eq!(
+        positions(CallOutputOptions::default().with_keep_masked_reference(true)),
+        [1, 2, 3, 4]
     );
 }
 

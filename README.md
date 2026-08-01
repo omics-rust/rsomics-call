@@ -39,9 +39,11 @@ also groups consecutive reference calls into bcftools-compatible gVCF depth
 blocks with typed `END` and `MIN_DP` output. Likelihood sample selection is
 projected during record decoding, while call sample files preserve requested
 order and bind explicit sex or fixed ploidy through the same definition. It
-does not yet expose a command-line binary. Incomplete commands stay absent
-until complete command orchestration, call-stage region and target selection,
-target-exclusion policy, and oracle and performance gates pass.
+applies masked-reference, variant-only, and SNP/indel skip policy before
+serialization with bcftools-compatible record-type semantics. It does not yet
+expose a command-line binary. Incomplete commands stay absent until complete
+command orchestration, the remaining caller allele policies, call-stage
+targets, target-exclusion policy, and oracle and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample

@@ -7,11 +7,11 @@ use noodles::sam::alignment::io::Write as _;
 use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
-    AlignmentInput, CallModel, CallSampleSelection, CalledVcfSchema, GvcfBlocker,
-    IndelLikelihoodConfig, IndexedLikelihoodVariantReader, LikelihoodCallRun, LikelihoodSite,
-    LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, MultiallelicCallerConfig,
-    PloidyDefinition, PloidyPreset, SamplePloidy, SampleSelection, SnpLikelihoodConfig,
-    SnpLikelihoodRun,
+    AlignmentInput, CallModel, CallOutputOptions, CallSampleSelection, CalledVcfSchema,
+    GvcfBlocker, IndelLikelihoodConfig, IndexedLikelihoodVariantReader, LikelihoodCallRun,
+    LikelihoodSite, LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller,
+    MultiallelicCallerConfig, PloidyDefinition, PloidyPreset, SamplePloidy, SampleSelection,
+    SnpLikelihoodConfig, SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
 
@@ -620,6 +620,98 @@ fn sample_call_signature(data: &[u8]) -> (Vec<String>, Vec<Vec<(String, String)>
         })
         .collect();
     (header, records)
+}
+
+fn called_site_signature(data: &[u8]) -> Vec<(String, String, String, String)> {
+    String::from_utf8(data.to_vec())
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (
+                fields[0].to_owned(),
+                fields[1].to_owned(),
+                fields[3].to_owned(),
+                fields[4].to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn call_site_output_policy_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("call-filter.vcf");
+    fs::write(
+        &input,
+        "##fileformat=VCFv4.2\n\
+         ##contig=<ID=chr1,length=10>\n\
+         ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+         ##INFO=<ID=INDEL,Number=0,Type=Flag,Description=\"Indel likelihood\">\n\
+         ##INFO=<ID=IDV,Number=1,Type=Integer,Description=\"Indel support\">\n\
+         ##INFO=<ID=IMF,Number=1,Type=Float,Description=\"Indel fraction\">\n\
+         ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Likelihoods\">\n\
+         ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n\
+         chr1\t1\t.\tA\t<*>\t.\t.\tQS=1,0\tPL:DP\t0,100,200:10\n\
+         chr1\t2\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n\
+         chr1\t3\t.\tN\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n\
+         chr1\t4\t.\tA\tAT,<*>\t.\t.\tINDEL;IDV=2;IMF=1;QS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n",
+    )
+    .unwrap();
+
+    for (arguments, options) in [
+        (vec!["-m"], CallOutputOptions::default()),
+        (
+            vec!["-m", "-v"],
+            CallOutputOptions::default().with_variants_only(true),
+        ),
+        (
+            vec!["-m", "-V", "snps"],
+            CallOutputOptions::default().with_skip_snps(true),
+        ),
+        (
+            vec!["-m", "-V", "indels"],
+            CallOutputOptions::default().with_skip_indels(true),
+        ),
+        (
+            vec!["-m", "-M"],
+            CallOutputOptions::default().with_keep_masked_reference(true),
+        ),
+    ] {
+        let expected = Command::new(bcftools())
+            .arg("call")
+            .args(arguments)
+            .arg("-Ov")
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+
+        let data = fs::read(&input).unwrap();
+        let reader = LikelihoodVariantReader::new(&data[..]).unwrap();
+        let resolver = PloidyDefinition::preset(PloidyPreset::Diploid)
+            .default_resolver(1)
+            .unwrap();
+        let actual = LikelihoodCallRun::new(
+            CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+            resolver,
+        )
+        .with_output_options(options)
+        .run(reader, Vec::new(), rsomics_call::VariantOutputFormat::Vcf)
+        .unwrap();
+        assert_eq!(
+            called_site_signature(&actual),
+            called_site_signature(&expected.stdout)
+        );
+    }
 }
 
 #[test]

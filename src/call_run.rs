@@ -16,10 +16,55 @@ pub enum CallModel {
     Consensus(ConsensusCallerConfig),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CallOutputOptions {
+    variants_only: bool,
+    keep_masked_reference: bool,
+    skip_snps: bool,
+    skip_indels: bool,
+}
+
+impl CallOutputOptions {
+    pub fn with_variants_only(mut self, enabled: bool) -> Self {
+        self.variants_only = enabled;
+        self
+    }
+
+    pub fn with_keep_masked_reference(mut self, enabled: bool) -> Self {
+        self.keep_masked_reference = enabled;
+        self
+    }
+
+    pub fn with_skip_snps(mut self, enabled: bool) -> Self {
+        self.skip_snps = enabled;
+        self
+    }
+
+    pub fn with_skip_indels(mut self, enabled: bool) -> Self {
+        self.skip_indels = enabled;
+        self
+    }
+
+    fn accepts(self, source: &LikelihoodSite, called: &CalledSite) -> bool {
+        if !self.keep_masked_reference && source.reference().as_bytes().contains(&b'N') {
+            return false;
+        }
+        if source.indel_summary().is_some() {
+            if self.skip_indels {
+                return false;
+            }
+        } else if self.skip_snps {
+            return false;
+        }
+        !self.variants_only || called.is_variant()
+    }
+}
+
 pub struct LikelihoodCallRun {
     caller: SiteCaller,
     ploidy: PloidyResolver,
     gvcf: Option<GvcfBlocker>,
+    output: CallOutputOptions,
 }
 
 enum SiteCaller {
@@ -39,6 +84,7 @@ impl LikelihoodCallRun {
             caller,
             ploidy,
             gvcf: None,
+            output: CallOutputOptions::default(),
         }
     }
 
@@ -48,6 +94,11 @@ impl LikelihoodCallRun {
         }
         self.gvcf = Some(GvcfBlocker::new(thresholds)?);
         Ok(self)
+    }
+
+    pub fn with_output_options(mut self, options: CallOutputOptions) -> Self {
+        self.output = options;
+        self
     }
 
     pub fn run<R, W>(
@@ -129,6 +180,7 @@ impl LikelihoodCallRun {
             caller: self.caller,
             ploidy: self.ploidy,
             gvcf: self.gvcf,
+            output: self.output,
             writer: CalledVariantWriter::new(output, schema, format)?,
             reference_names: input_schema
                 .header()
@@ -148,6 +200,7 @@ where
     caller: SiteCaller,
     ploidy: PloidyResolver,
     gvcf: Option<GvcfBlocker>,
+    output: CallOutputOptions,
     writer: CalledVariantWriter<W>,
     reference_names: Box<[Box<str>]>,
     ploidies: Vec<CallPloidy>,
@@ -169,6 +222,9 @@ where
             .caller
             .call(site, &self.ploidies, self.ploidy.prior_chromosome_count())
             .map_err(|error| call_record_error(record, error))?;
+        if !self.output.accepts(site, &called) {
+            return Ok(());
+        }
         if let Some(blocker) = &mut self.gvcf {
             blocker.push(called, |called| self.writer.write_site(&called))
         } else {
