@@ -9,6 +9,7 @@ const SITE_PHRED_SCALE: f64 = 4.343;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MultiallelicCallerConfig {
     mutation_rate: f64,
+    keep_alternates: bool,
 }
 
 impl MultiallelicCallerConfig {
@@ -16,7 +17,15 @@ impl MultiallelicCallerConfig {
         if !mutation_rate.is_finite() || mutation_rate <= 0.0 || mutation_rate >= 1.0 {
             return Err(CallError::InvalidMutationRate);
         }
-        Ok(Self { mutation_rate })
+        Ok(Self {
+            mutation_rate,
+            keep_alternates: false,
+        })
+    }
+
+    pub fn with_keep_alternates(mut self, enabled: bool) -> Self {
+        self.keep_alternates = enabled;
+        self
     }
 }
 
@@ -24,6 +33,7 @@ impl Default for MultiallelicCallerConfig {
     fn default() -> Self {
         Self {
             mutation_rate: 1.1e-3,
+            keep_alternates: false,
         }
     }
 }
@@ -117,11 +127,6 @@ impl MultiallelicCaller {
             .collect::<Vec<_>>();
         let log_prior = adjusted_log_prior(self.config.mutation_rate, prior_chromosome_count);
         let groups = caller_groups(site, sample_groups, &likelihoods, &ploidies, log_prior)?;
-        let unseen = site
-            .alternates()
-            .iter()
-            .position(|allele| matches!(allele.as_bytes(), b"<*>" | b"<NON_REF>"))
-            .map(|index| index + 1);
         let mut retained = vec![false; allele_count];
         for group in &groups {
             for (retained, &selected) in retained.iter_mut().zip(&group.selection.alleles) {
@@ -129,8 +134,18 @@ impl MultiallelicCaller {
             }
         }
         retained[0] = true;
-        if let Some(index) = unseen {
-            retained[index] = false;
+        let has_variant = site.alternates().iter().enumerate().any(|(index, allele)| {
+            retained[index + 1] && !matches!(allele.as_bytes(), b"<*>" | b"<NON_REF>")
+        });
+        if self.config.keep_alternates && has_variant {
+            retained.fill(true);
+        }
+        for (index, allele) in site.alternates().iter().enumerate() {
+            let remove = allele.as_bytes() == b"<*>"
+                || !self.config.keep_alternates && allele.as_bytes() == b"<NON_REF>";
+            if remove {
+                retained[index + 1] = false;
+            }
         }
         let retained = retained
             .iter()

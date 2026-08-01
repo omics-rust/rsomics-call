@@ -639,6 +639,37 @@ fn called_site_signature(data: &[u8]) -> Vec<(String, String, String, String)> {
         .collect()
 }
 
+fn called_allele_signature(data: &[u8]) -> Vec<String> {
+    String::from_utf8(data.to_vec())
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let keys = fields[8].split(':').collect::<Vec<_>>();
+            let samples = fields[9..]
+                .iter()
+                .map(|sample| {
+                    let values = sample.split(':').collect::<Vec<_>>();
+                    ["GT", "PL", "DP", "AD", "QS"]
+                        .into_iter()
+                        .map(|key| {
+                            let index = keys.iter().position(|value| *value == key).unwrap();
+                            values[index]
+                        })
+                        .collect::<Vec<_>>()
+                        .join(":")
+                })
+                .collect::<Vec<_>>()
+                .join("\t");
+            format!(
+                "{}\t{}\t{}\t{}\t{samples}",
+                fields[0], fields[1], fields[3], fields[4]
+            )
+        })
+        .collect()
+}
+
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
 fn call_site_output_policy_matches_bcftools_1_24() {
@@ -765,6 +796,50 @@ fn grouped_call_workflow_matches_bcftools_1_24() {
         sample_call_signature(&actual),
         sample_call_signature(&expected.stdout)
     );
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn keep_alternates_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let original = fs::read_to_string("tests/golden/bcftools-1.24-likelihood.vcf").unwrap();
+    for (name, data) in [
+        ("star", original.clone()),
+        ("non-ref", original.replace("<*>", "<NON_REF>")),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join(format!("{name}.vcf"));
+        fs::write(&input, &data).unwrap();
+        let expected = Command::new(bcftools())
+            .args(["call", "-m", "-A", "-a", "GP,GQ", "-s", "s1,s3", "-Ov"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+
+        let reader = LikelihoodVariantReader::new(data.as_bytes())
+            .unwrap()
+            .select_samples(["s1", "s3"])
+            .unwrap();
+        let resolver = PloidyDefinition::preset(PloidyPreset::Diploid)
+            .default_resolver(2)
+            .unwrap();
+        let actual = LikelihoodCallRun::new(
+            CallModel::Multiallelic(MultiallelicCallerConfig::default().with_keep_alternates(true)),
+            resolver,
+        )
+        .run(reader, Vec::new(), rsomics_call::VariantOutputFormat::Vcf)
+        .unwrap();
+        assert_eq!(
+            called_allele_signature(&actual),
+            called_allele_signature(&expected.stdout),
+            "{name}"
+        );
+    }
 }
 
 #[test]
