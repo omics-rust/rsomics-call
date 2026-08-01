@@ -16,11 +16,15 @@ readme = "README.md"
 doctest = false
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 noodles = { version = "0.110", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "tabix", "vcf"] }
 noodles-util = { version = "0.79", features = ["variant"] }
 rsomics-bamio = "0.3"
+rsomics-common = "0.10"
+rsomics-help = "0.4"
 rsomics-pileup = "0.3"
+same-file = "1"
 thiserror = "2"
 
 [dev-dependencies]

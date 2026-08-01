@@ -3,14 +3,30 @@
 `rsomics-call` is the alignment-likelihood and lightweight small-variant
 calling product in the rsomics portfolio.
 
-The repository is under implementation and is not published. Its release
-contract contains three commands:
+The crate remains unpublished while its release performance gates are being
+completed. Its implemented product surface contains three commands:
 
 ```text
 rsomics-call pileup
 rsomics-call call
 rsomics-call run
 ```
+
+`pileup` writes likelihood VCF/BCF from one or more coordinate-sorted
+alignments, `call` consumes likelihood VCF/BCF, and `run` executes the same
+typed stages without serializing an intermediate file. For example:
+
+```sh
+rsomics-call pileup -f reference.fa alignments.bam -Ou -o likelihoods.bcf
+rsomics-call call likelihoods.bcf --model multiallelic -v -Ob -o calls.bcf
+rsomics-call run -f reference.fa alignments.bam -v -Ob -o calls.bcf
+```
+
+All three commands use the shared `rsomics-help` command tree and
+`rsomics-common` result and output contracts. Variant data may stream to
+standard output, while named outputs are committed transactionally. `--json`
+requires named variant output so the machine result envelope remains a
+separate standard-output stream.
 
 The current code establishes coordinate-merged SAM/BAM/CRAM input, multi-input
 sample projection, bounded reference caching, and streaming SNP likelihoods
@@ -30,7 +46,11 @@ STR penalties, pooled or per-sample candidate support, explicit ambiguous-read
 allele-depth policy, typed indel annotations, zero-copy, haploid, diploid, and
 independently grouped multiallelic calls, a fused typed calling path, and strict
 likelihood and called-record streams for plain VCF, BGZF VCF, raw BCF, and BGZF
-BCF. Pileup records carry the bcftools default bias metrics plus strand-aware
+BCF. The command boundary also binds alignment lists, sample projection,
+indexed region files, streaming target files, flag filters, overlap and depth
+policy, BAQ, indel policy, caller models, ploidy, grouped samples, gVCF blocks,
+prior-frequency tags, and all four output encodings. Pileup records carry the
+bcftools default bias metrics plus strand-aware
 allele depths, quality means and sums, strand bias, mismatch, and soft-clip
 annotations at sample and site scope. These paths are checked against bcftools
 and HTSlib 1.24. Called records retain those annotations, replace the internal
@@ -47,10 +67,14 @@ groups, retain unused alternate dimensions at variant sites, and incorporate
 validated integer panel allele counts from configurable prior-frequency INFO
 tags. Prior counts remain aligned when output alleles are projected. The call
 stream applies masked-reference, variant-only, and SNP/indel skip policy before
-serialization with bcftools-compatible record-type semantics. It does not yet
-expose a command-line binary. Incomplete commands stay absent until complete
-command orchestration, unseen-allele policy, call-stage targets,
-target-exclusion policy, and oracle and performance gates pass.
+serialization with bcftools-compatible record-type semantics. Call sample
+files currently accept exactly one sample name per row; the contradictory
+bcftools 1.24 optional sex and numeric-ploidy behavior is not exposed as a
+command-line promise. Call-stage targets, target complements, and a separate
+unseen-allele switch are likewise absent until their documented and installed
+bcftools 1.24 behaviors can be reconciled. The complete implemented commands
+remain available while these isolated options and the product performance
+gate are unresolved.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample

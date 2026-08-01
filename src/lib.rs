@@ -7,6 +7,7 @@ mod call_run;
 mod call_samples;
 mod called;
 mod caller;
+mod cli;
 mod consensus;
 mod errmod;
 mod error;
@@ -47,3 +48,9 @@ pub use stream::{
     CalledVariantWriter, IndexedLikelihoodVariantReader, LikelihoodVariantReader,
     LikelihoodVariantWriter, VariantOutputFormat,
 };
+
+/// Runs the `rsomics-call` product command line.
+#[must_use]
+pub fn run_binary() -> std::process::ExitCode {
+    cli::run()
+}

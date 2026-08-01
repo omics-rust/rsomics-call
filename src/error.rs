@@ -108,6 +108,9 @@ pub enum CallError {
     #[error("a FASTA reference is required for {0}")]
     MissingLikelihoodReference(&'static str),
 
+    #[error("invalid BAQ configuration: {0}")]
+    InvalidBaqConfiguration(&'static str),
+
     #[error(transparent)]
     Pileup(#[from] rsomics_pileup::PileupError),
 
@@ -125,6 +128,9 @@ pub enum CallError {
 
     #[error("invalid indel likelihood configuration")]
     InvalidIndelConfig,
+
+    #[error("invalid indel configuration: {0}")]
+    InvalidIndelConfiguration(&'static str),
 
     #[error("invalid indel site summary")]
     InvalidIndelSummary,
