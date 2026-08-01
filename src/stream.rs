@@ -19,9 +19,7 @@ where
     R: Read,
 {
     inner: variant::io::Reader<R>,
-    input_schema: LikelihoodVcfSchema,
-    schema: LikelihoodVcfSchema,
-    sample_indices: Box<[usize]>,
+    projection: LikelihoodProjection,
     record: variant::Record,
     record_number: u64,
     started: bool,
@@ -34,13 +32,9 @@ where
     pub fn new(reader: R) -> Result<Self> {
         let mut inner = variant::io::Reader::new(reader).map_err(input_error)?;
         let header = inner.read_header().map_err(input_error)?;
-        let schema = LikelihoodVcfSchema::from_header(header)?;
-        let sample_indices = (0..schema.header().sample_names().len()).collect();
         Ok(Self {
             inner,
-            input_schema: schema.clone(),
-            schema,
-            sample_indices,
+            projection: LikelihoodProjection::new(header)?,
             record: variant::Record::default(),
             record_number: 0,
             started: false,
@@ -48,7 +42,7 @@ where
     }
 
     pub fn schema(&self) -> &LikelihoodVcfSchema {
-        &self.schema
+        self.projection.schema()
     }
 
     pub fn record_number(&self) -> u64 {
@@ -56,10 +50,85 @@ where
     }
 
     pub fn select_samples(
-        self,
+        mut self,
         samples: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Self> {
         self.require_unread()?;
+        self.projection.select_samples(samples)?;
+        Ok(self)
+    }
+
+    pub fn exclude_samples(
+        mut self,
+        samples: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self> {
+        self.require_unread()?;
+        self.projection.exclude_samples(samples)?;
+        Ok(self)
+    }
+
+    pub fn read_site(&mut self) -> Result<Option<LikelihoodSite>> {
+        self.started = true;
+        let record_number = self.record_number + 1;
+        let size = self
+            .inner
+            .read_record(&mut self.record)
+            .map_err(|error| record_error(record_number, error))?;
+        if size == 0 {
+            return Ok(None);
+        }
+        self.record_number = record_number;
+        let record = vcf::variant::RecordBuf::try_from_variant_record(
+            self.projection.input_header(),
+            &self.record,
+        )
+        .map_err(|error| record_error(record_number, error))?;
+        self.projection
+            .decode(&record)
+            .map_err(|error| CallError::LikelihoodVariantRecord {
+                record: record_number,
+                message: error.to_string(),
+            })
+            .map(Some)
+    }
+
+    fn require_unread(&self) -> Result<()> {
+        if self.started {
+            return Err(CallError::LateLikelihoodSampleSelection);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct LikelihoodProjection {
+    input_schema: LikelihoodVcfSchema,
+    schema: LikelihoodVcfSchema,
+    sample_indices: Box<[usize]>,
+}
+
+impl LikelihoodProjection {
+    pub(crate) fn new(header: vcf::Header) -> Result<Self> {
+        let schema = LikelihoodVcfSchema::from_header(header)?;
+        let sample_indices = (0..schema.header().sample_names().len()).collect();
+        Ok(Self {
+            input_schema: schema.clone(),
+            schema,
+            sample_indices,
+        })
+    }
+
+    pub(crate) fn schema(&self) -> &LikelihoodVcfSchema {
+        &self.schema
+    }
+
+    pub(crate) fn input_header(&self) -> &vcf::Header {
+        self.input_schema.header()
+    }
+
+    pub(crate) fn select_samples(
+        &mut self,
+        samples: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<()> {
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
         for sample in samples {
@@ -78,11 +147,10 @@ where
         self.set_sample_indices(indices)
     }
 
-    pub fn exclude_samples(
-        self,
+    pub(crate) fn exclude_samples(
+        &mut self,
         samples: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> Result<Self> {
-        self.require_unread()?;
+    ) -> Result<()> {
         let mut excluded = HashSet::new();
         for sample in samples {
             let sample = sample.as_ref();
@@ -104,39 +172,12 @@ where
         self.set_sample_indices(indices)
     }
 
-    pub fn read_site(&mut self) -> Result<Option<LikelihoodSite>> {
-        self.started = true;
-        let record_number = self.record_number + 1;
-        let size = self
-            .inner
-            .read_record(&mut self.record)
-            .map_err(|error| record_error(record_number, error))?;
-        if size == 0 {
-            return Ok(None);
-        }
-        self.record_number = record_number;
-        let record = vcf::variant::RecordBuf::try_from_variant_record(
-            self.input_schema.header(),
-            &self.record,
-        )
-        .map_err(|error| record_error(record_number, error))?;
+    pub(crate) fn decode(&self, record: &vcf::variant::RecordBuf) -> Result<LikelihoodSite> {
         self.input_schema
-            .decode_selected_likelihood(&record, &self.sample_indices)
-            .map_err(|error| CallError::LikelihoodVariantRecord {
-                record: record_number,
-                message: error.to_string(),
-            })
-            .map(Some)
+            .decode_selected_likelihood(record, &self.sample_indices)
     }
 
-    fn require_unread(&self) -> Result<()> {
-        if self.started {
-            return Err(CallError::LateLikelihoodSampleSelection);
-        }
-        Ok(())
-    }
-
-    fn set_sample_indices(mut self, indices: Vec<usize>) -> Result<Self> {
+    fn set_sample_indices(&mut self, indices: Vec<usize>) -> Result<()> {
         if indices.is_empty() {
             return Err(CallError::InvalidSampleCount);
         }
@@ -149,7 +190,7 @@ where
         }
         self.schema = LikelihoodVcfSchema::from_header(header)?;
         self.sample_indices = indices.into_boxed_slice();
-        Ok(self)
+        Ok(())
     }
 }
 
