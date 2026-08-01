@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -10,8 +11,8 @@ use rsomics_pileup::{BaqOptions, PileupEngine, PileupOptions};
 
 use crate::{
     AlignmentInput, AlignmentSet, CallError, CalledSite, IndelLikelihoodConfig, IndelSiteBuilder,
-    LikelihoodSite, Nucleotide, ReferenceSequence, Result, SampleMap, SampleSelection,
-    SnpLikelihoodConfig, SnpSiteBuilder,
+    LikelihoodCallRun, LikelihoodSite, LikelihoodVcfSchema, Nucleotide, ReferenceSequence, Result,
+    SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder, VariantOutputFormat,
     alignment::IndexedAlignmentSet,
     selection::{ReferenceRange, RegionSelection, TargetSet, normalize_regions},
 };
@@ -297,6 +298,24 @@ impl SnpLikelihoodRun {
         mut emit: impl FnMut(CalledSite) -> Result<()>,
     ) -> Result<()> {
         self.run(|site| emit(call(&site)?))
+    }
+
+    pub fn run_calls<W>(
+        self,
+        calls: LikelihoodCallRun,
+        output: W,
+        format: VariantOutputFormat,
+    ) -> Result<W>
+    where
+        W: Write,
+    {
+        let schema = LikelihoodVcfSchema::new(
+            self.reference_sequences()
+                .iter()
+                .map(|reference| (reference.name(), reference.length())),
+            self.samples().samples(),
+        )?;
+        calls.run_generated(&schema, output, format, |emit| self.run(|site| emit(&site)))
     }
 }
 
@@ -1045,6 +1064,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(fused, expected);
+    }
+
+    #[test]
+    fn fused_call_run_matches_materialized_workflow() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+        let reference = fixtures.join("alignment-reference.fa");
+        let first = sam_file("S1", 'A');
+        let second = sam_file("S2", 'G');
+        let open = || {
+            SnpLikelihoodRun::open(
+                [
+                    AlignmentInput::new(1, first.path(), "first"),
+                    AlignmentInput::new(2, second.path(), "second"),
+                ],
+                &reference,
+                SampleSelection::default(),
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            )
+            .unwrap()
+        };
+        let calls = || {
+            let ploidy = crate::PloidyDefinition::preset(crate::PloidyPreset::Diploid)
+                .default_resolver(2)
+                .unwrap();
+            crate::LikelihoodCallRun::new(
+                crate::CallModel::Multiallelic(crate::MultiallelicCallerConfig::default()),
+                ploidy,
+            )
+            .with_sample_groups([0, 1])
+            .unwrap()
+            .with_gvcf([5])
+            .unwrap()
+            .with_output_options(crate::CallOutputOptions::default().with_variants_only(true))
+        };
+
+        let likelihoods = open();
+        let schema = LikelihoodVcfSchema::new(
+            likelihoods
+                .reference_sequences()
+                .iter()
+                .map(|reference| (reference.name(), reference.length())),
+            likelihoods.samples().samples(),
+        )
+        .unwrap();
+        let mut writer =
+            LikelihoodVariantWriter::new(Vec::new(), schema, VariantOutputFormat::Vcf).unwrap();
+        likelihoods.run(|site| writer.write_site(&site)).unwrap();
+        let likelihoods = writer.finish().unwrap();
+        let expected = calls()
+            .run(
+                LikelihoodVariantReader::new(likelihoods.as_slice()).unwrap(),
+                Vec::new(),
+                VariantOutputFormat::Vcf,
+            )
+            .unwrap();
+
+        let actual = open()
+            .run_calls(calls(), Vec::new(), VariantOutputFormat::Vcf)
+            .unwrap();
+
+        assert!(!actual.is_empty());
+        assert_eq!(actual, expected);
     }
 
     #[test]

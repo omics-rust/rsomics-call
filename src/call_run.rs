@@ -166,6 +166,25 @@ impl LikelihoodCallRun {
         run.finish()
     }
 
+    pub(crate) fn run_generated<W>(
+        self,
+        input_schema: &LikelihoodVcfSchema,
+        output: W,
+        format: VariantOutputFormat,
+        generate: impl FnOnce(&mut dyn FnMut(&LikelihoodSite) -> Result<()>) -> Result<()>,
+    ) -> Result<W>
+    where
+        W: Write,
+    {
+        let mut run = self.start(input_schema, output, format)?;
+        let mut record = 0;
+        generate(&mut |site| {
+            record += 1;
+            run.push(record, site)
+        })?;
+        run.finish()
+    }
+
     fn start<W>(
         self,
         input_schema: &LikelihoodVcfSchema,
