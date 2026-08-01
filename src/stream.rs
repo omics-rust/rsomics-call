@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{self, BufWriter, Read, Write};
 
 use noodles::{bcf, bgzf, vcf, vcf::variant::io::Write as _};
@@ -18,9 +19,12 @@ where
     R: Read,
 {
     inner: variant::io::Reader<R>,
+    input_schema: LikelihoodVcfSchema,
     schema: LikelihoodVcfSchema,
+    sample_indices: Box<[usize]>,
     record: variant::Record,
     record_number: u64,
+    started: bool,
 }
 
 impl<R> LikelihoodVariantReader<R>
@@ -31,11 +35,15 @@ where
         let mut inner = variant::io::Reader::new(reader).map_err(input_error)?;
         let header = inner.read_header().map_err(input_error)?;
         let schema = LikelihoodVcfSchema::from_header(header)?;
+        let sample_indices = (0..schema.header().sample_names().len()).collect();
         Ok(Self {
             inner,
+            input_schema: schema.clone(),
             schema,
+            sample_indices,
             record: variant::Record::default(),
             record_number: 0,
+            started: false,
         })
     }
 
@@ -47,7 +55,57 @@ where
         self.record_number
     }
 
+    pub fn select_samples(
+        self,
+        samples: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self> {
+        self.require_unread()?;
+        let mut seen = HashSet::new();
+        let mut indices = Vec::new();
+        for sample in samples {
+            let sample = sample.as_ref();
+            if !seen.insert(sample.to_owned()) {
+                return Err(CallError::DuplicateSampleSelection(sample.to_owned()));
+            }
+            let index = self
+                .input_schema
+                .header()
+                .sample_names()
+                .get_index_of(sample)
+                .ok_or_else(|| CallError::MissingSelectedSample(sample.to_owned()))?;
+            indices.push(index);
+        }
+        self.set_sample_indices(indices)
+    }
+
+    pub fn exclude_samples(
+        self,
+        samples: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self> {
+        self.require_unread()?;
+        let mut excluded = HashSet::new();
+        for sample in samples {
+            let sample = sample.as_ref();
+            if !excluded.insert(sample.to_owned()) {
+                return Err(CallError::DuplicateSampleSelection(sample.to_owned()));
+            }
+            if !self.input_schema.header().sample_names().contains(sample) {
+                return Err(CallError::MissingSelectedSample(sample.to_owned()));
+            }
+        }
+        let indices = self
+            .input_schema
+            .header()
+            .sample_names()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sample)| (!excluded.contains(sample)).then_some(index))
+            .collect();
+        self.set_sample_indices(indices)
+    }
+
     pub fn read_site(&mut self) -> Result<Option<LikelihoodSite>> {
+        self.started = true;
         let record_number = self.record_number + 1;
         let size = self
             .inner
@@ -57,16 +115,41 @@ where
             return Ok(None);
         }
         self.record_number = record_number;
-        let record =
-            vcf::variant::RecordBuf::try_from_variant_record(self.schema.header(), &self.record)
-                .map_err(|error| record_error(record_number, error))?;
-        self.schema
-            .decode_likelihood(&record)
+        let record = vcf::variant::RecordBuf::try_from_variant_record(
+            self.input_schema.header(),
+            &self.record,
+        )
+        .map_err(|error| record_error(record_number, error))?;
+        self.input_schema
+            .decode_selected_likelihood(&record, &self.sample_indices)
             .map_err(|error| CallError::LikelihoodVariantRecord {
                 record: record_number,
                 message: error.to_string(),
             })
             .map(Some)
+    }
+
+    fn require_unread(&self) -> Result<()> {
+        if self.started {
+            return Err(CallError::LateLikelihoodSampleSelection);
+        }
+        Ok(())
+    }
+
+    fn set_sample_indices(mut self, indices: Vec<usize>) -> Result<Self> {
+        if indices.is_empty() {
+            return Err(CallError::InvalidSampleCount);
+        }
+        let mut header = self.input_schema.header().clone();
+        header.sample_names_mut().clear();
+        for &index in &indices {
+            header
+                .sample_names_mut()
+                .insert(self.input_schema.header().sample_names()[index].clone());
+        }
+        self.schema = LikelihoodVcfSchema::from_header(header)?;
+        self.sample_indices = indices.into_boxed_slice();
+        Ok(self)
     }
 }
 

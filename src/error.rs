@@ -45,8 +45,11 @@ pub enum CallError {
     #[error("sample selection contains a duplicate name: {0}")]
     DuplicateSampleSelection(String),
 
-    #[error("selected sample is absent from all inputs: {0}")]
+    #[error("selected sample is absent from the input: {0}")]
     MissingSelectedSample(String),
+
+    #[error("likelihood sample selection must be configured before reading records")]
+    LateLikelihoodSampleSelection,
 
     #[error("alignment source ID {0} is duplicated")]
     DuplicateAlignmentSource(u32),

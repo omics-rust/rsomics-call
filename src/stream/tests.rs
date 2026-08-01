@@ -116,6 +116,91 @@ fn reports_deferred_output_failures() {
     assert!(matches!(writer.finish(), Err(CallError::VariantOutput(_))));
 }
 
+#[test]
+fn projects_likelihood_samples_during_decode() {
+    let (schema, site) = multi_sample_fixture();
+    for format in FORMATS {
+        let mut writer = LikelihoodVariantWriter::new(Vec::new(), schema.clone(), format).unwrap();
+        writer.write_site(&site).unwrap();
+        let data = writer.finish().unwrap();
+
+        let mut reader = LikelihoodVariantReader::new(&data[..])
+            .unwrap()
+            .select_samples(["third", "first"])
+            .unwrap();
+        assert_eq!(
+            reader
+                .schema()
+                .header()
+                .sample_names()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["third", "first"]
+        );
+        let projected = reader.read_site().unwrap().unwrap();
+        assert_eq!(projected.samples().len(), 2);
+        assert_eq!(
+            projected.samples()[0].phred_likelihoods(),
+            site.samples()[2].phred_likelihoods()
+        );
+        assert_eq!(
+            projected.samples()[1].phred_likelihoods(),
+            site.samples()[0].phred_likelihoods()
+        );
+
+        let mut reader = LikelihoodVariantReader::new(&data[..])
+            .unwrap()
+            .exclude_samples(["second"])
+            .unwrap();
+        assert_eq!(
+            reader
+                .schema()
+                .header()
+                .sample_names()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+        assert_eq!(reader.read_site().unwrap().unwrap().samples().len(), 2);
+    }
+}
+
+#[test]
+fn rejects_invalid_or_late_likelihood_sample_selection() {
+    let (schema, site) = multi_sample_fixture();
+    let mut writer =
+        LikelihoodVariantWriter::new(Vec::new(), schema, VariantOutputFormat::Vcf).unwrap();
+    writer.write_site(&site).unwrap();
+    let data = writer.finish().unwrap();
+
+    assert!(matches!(
+        LikelihoodVariantReader::new(&data[..])
+            .unwrap()
+            .select_samples(["first", "first"]),
+        Err(CallError::DuplicateSampleSelection(_))
+    ));
+    assert!(matches!(
+        LikelihoodVariantReader::new(&data[..])
+            .unwrap()
+            .exclude_samples(["absent"]),
+        Err(CallError::MissingSelectedSample(_))
+    ));
+    assert!(matches!(
+        LikelihoodVariantReader::new(&data[..])
+            .unwrap()
+            .exclude_samples(["first", "second", "third"]),
+        Err(CallError::InvalidSampleCount)
+    ));
+    let mut reader = LikelihoodVariantReader::new(&data[..]).unwrap();
+    reader.read_site().unwrap();
+    assert!(matches!(
+        reader.select_samples(["first"]),
+        Err(CallError::LateLikelihoodSampleSelection)
+    ));
+}
+
 fn fixture() -> (LikelihoodVcfSchema, LikelihoodSite) {
     let schema = LikelihoodVcfSchema::new([(b"chr1".as_slice(), 100)], ["sample"]).unwrap();
     let site = LikelihoodSite::new(
@@ -130,6 +215,30 @@ fn fixture() -> (LikelihoodVcfSchema, LikelihoodSite) {
             SampleEvidence::new(1, [0, 1], [0, 40]).unwrap(),
         )
         .unwrap()],
+    )
+    .unwrap();
+    (schema, site)
+}
+
+fn multi_sample_fixture() -> (LikelihoodVcfSchema, LikelihoodSite) {
+    let schema =
+        LikelihoodVcfSchema::new([(b"chr1".as_slice(), 100)], ["first", "second", "third"])
+            .unwrap();
+    let samples = [[0, 3, 40], [40, 3, 0], [20, 0, 20]].map(|likelihoods| {
+        SampleLikelihood::observed(
+            Ploidy::new(2).unwrap(),
+            likelihoods,
+            SampleEvidence::new(1, [1, 0], [40, 0]).unwrap(),
+        )
+        .unwrap()
+    });
+    let site = LikelihoodSite::new(
+        0,
+        9,
+        Allele::new(&b"A"[..]).unwrap(),
+        [Allele::new(&b"G"[..]).unwrap()],
+        [1.0, 1.0],
+        samples,
     )
     .unwrap();
     (schema, site)

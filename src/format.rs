@@ -548,6 +548,22 @@ impl LikelihoodVcfSchema {
     }
 
     pub fn decode_likelihood(&self, record: &vcf::variant::RecordBuf) -> Result<LikelihoodSite> {
+        self.decode_likelihood_samples(record, 0..self.header.sample_names().len())
+    }
+
+    pub(crate) fn decode_selected_likelihood(
+        &self,
+        record: &vcf::variant::RecordBuf,
+        sample_indices: &[usize],
+    ) -> Result<LikelihoodSite> {
+        self.decode_likelihood_samples(record, sample_indices.iter().copied())
+    }
+
+    fn decode_likelihood_samples(
+        &self,
+        record: &vcf::variant::RecordBuf,
+        sample_indices: impl IntoIterator<Item = usize>,
+    ) -> Result<LikelihoodSite> {
         let reference_sequence_id = self
             .header
             .contigs()
@@ -578,7 +594,8 @@ impl LikelihoodVcfSchema {
             return Err(invalid("record has no FORMAT/PL field"));
         }
 
-        let samples = (0..self.header.sample_names().len())
+        let samples = sample_indices
+            .into_iter()
             .map(|index| decode_sample(record.samples(), index, allele_count))
             .collect::<Result<Vec<_>>>()?;
         let mut site = LikelihoodSite::new(

@@ -265,6 +265,93 @@ fn gvcf_depth_blocks_match_bcftools_1_24() {
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn likelihood_sample_projection_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("samples.vcf");
+    fs::write(
+        &input,
+        "##fileformat=VCFv4.2\n\
+         ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+         ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n\
+         ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+         ##contig=<ID=chr1,length=10>\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tfirst\tsecond\tthird\n\
+         chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n",
+    )
+    .unwrap();
+
+    for (argument, exclude) in [("third,first", false), ("^second", true)] {
+        let expected = Command::new(bcftools())
+            .args(["call", "-m", "-a", "GP,GQ", "-s", argument, "-Ov"])
+            .arg(&input)
+            .output()
+            .unwrap();
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+
+        let data = fs::read(&input).unwrap();
+        let reader = LikelihoodVariantReader::new(&data[..]).unwrap();
+        let reader = if exclude {
+            reader.exclude_samples(["second"]).unwrap()
+        } else {
+            reader.select_samples(["third", "first"]).unwrap()
+        };
+        let schema = CalledVcfSchema::from_likelihood(reader.schema());
+        let actual = rsomics_call::run_likelihood_calls(
+            reader,
+            Vec::new(),
+            schema,
+            rsomics_call::VariantOutputFormat::Vcf,
+            |site| MultiallelicCaller::default().call(site),
+        )
+        .unwrap();
+        assert_eq!(
+            sample_call_signature(&actual),
+            sample_call_signature(&expected.stdout)
+        );
+    }
+}
+
+fn sample_call_signature(data: &[u8]) -> (Vec<String>, Vec<Vec<(String, String)>>) {
+    let text = String::from_utf8(data.to_vec()).unwrap();
+    let header = text
+        .lines()
+        .find(|line| line.starts_with("#CHROM"))
+        .unwrap()
+        .split('\t')
+        .skip(9)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let records = text
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let keys = fields[8].split(':').collect::<Vec<_>>();
+            fields[9..]
+                .iter()
+                .map(|sample| {
+                    let values = sample.split(':').collect::<Vec<_>>();
+                    ["GT", "DP"]
+                        .into_iter()
+                        .map(|key| {
+                            let index = keys.iter().position(|value| *value == key).unwrap();
+                            (key.to_owned(), values[index].to_owned())
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    (header, records)
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn grch37_ploidy_preset_matches_bcftools_1_24() {
     assert_bcftools_1_24();
     let directory = tempfile::tempdir().unwrap();
