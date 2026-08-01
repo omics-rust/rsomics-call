@@ -2,6 +2,7 @@
 
 mod alignment;
 mod annotation;
+mod call_annotation;
 mod called;
 mod caller;
 mod consensus;
@@ -19,6 +20,7 @@ mod stream;
 mod target_file;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
+pub use call_annotation::CalledAnnotations;
 pub use called::{CallPloidy, CalledSample, CalledSite};
 pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};
 pub use consensus::{ConsensusCaller, ConsensusCallerConfig};

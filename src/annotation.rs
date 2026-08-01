@@ -718,7 +718,7 @@ fn complementary_error(value: f64) -> f64 {
     }
 }
 
-fn fisher_exact(n11: u64, n12: u64, n21: u64, n22: u64) -> (f64, f64) {
+pub(crate) fn fisher_exact(n11: u64, n12: u64, n21: u64, n22: u64) -> (f64, f64) {
     let row = n11 + n12;
     let column = n11 + n21;
     let total = row + n21 + n22;
@@ -785,7 +785,7 @@ fn ln_binomial(n: u64, k: u64) -> f64 {
     }
 }
 
-fn ln_gamma(value: f64) -> f64 {
+pub(crate) fn ln_gamma(value: f64) -> f64 {
     let mut sum = 0.165_947_018_740_846_2e-6 / (value + 7.0);
     sum += 0.993_493_711_393_074_8e-5 / (value + 6.0);
     sum -= 0.138_571_033_129_652_6 / (value + 5.0);

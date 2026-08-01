@@ -30,10 +30,12 @@ likelihood and called-record streams for plain VCF, BGZF VCF, raw BCF, and BGZF
 BCF. Pileup records carry the bcftools default bias metrics plus strand-aware
 allele depths, quality means and sums, strand bias, mismatch, and soft-clip
 annotations at sample and site scope. These paths are checked against bcftools
-and HTSlib 1.24. It does not yet expose a command-line binary. Incomplete
-commands stay absent until caller PV4 annotations, target-exclusion behavior,
-gVCF behavior, complete command orchestration, and oracle and performance gates
-pass.
+and HTSlib 1.24. Called records retain those annotations, replace the internal
+`I16` evidence with model-specific `DP4`, `MQ`, and `PV4`, and preserve
+allele-indexed fields when callers trim alternates. It does not yet expose a
+command-line binary. Incomplete commands stay absent until target-exclusion
+behavior, ploidy input, gVCF behavior, complete command orchestration, and
+oracle and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
@@ -52,9 +54,9 @@ The established indel likelihood path follows bcftools 1.24
 attribution and licenses are retained in `THIRD_PARTY_LICENSES.md`,
 `LICENSES/BCFTOOLS-MIT.txt`, and `LICENSES/HTSLIB-MIT.txt`.
 
-Pileup annotations follow bcftools 1.24 `bam2bcf.c`; Fisher exact and related
-numerical kernels follow HTSlib 1.24 `kfunc.c`. Their MIT notices are retained
-in the same license files.
+Pileup annotations and caller-side bias tests follow bcftools 1.24 `bam2bcf.c`,
+`ccall.c`, and `mcall.c`; Fisher exact and related numerical kernels follow
+HTSlib 1.24 `kfunc.c`. Their MIT notices are retained in the same license files.
 
 The revised MAQ error model follows HTSlib 1.24 `errmod.c`, Copyright Broad
 Institute and Genome Research Ltd., under the MIT/Expat license retained in

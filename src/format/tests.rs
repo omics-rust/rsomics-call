@@ -56,7 +56,10 @@ fn decodes_bcftools_1_24_likelihood_record() {
         .unwrap();
     let called_fields = called_line.split('\t').collect::<Vec<_>>();
     assert_eq!(&called_fields[..5], ["chr1", "1", ".", "A", "G,C"]);
-    assert_eq!(called_fields[7], "AC=2,1;AN=6");
+    assert_eq!(
+        called_fields[7],
+        "AC=2,1;AN=6;DP=3;VDB=0.02;SGB=-0.94647;RPBZ=0;MQBZ=0;BQBZ=0;SCBZ=0;MQ0F=0;DP4=1,0,2,0;MQ=60;PV4=1,1,1,1"
+    );
     assert_eq!(called_fields[8], "GT:PL:DP:AD:QS:GP:GQ");
     assert!(called_fields[9].starts_with("0/1:0,3,40,3,40,40:"));
     let mut called_vcf_reader = vcf::io::Reader::new(&called_vcf[..]);
@@ -221,6 +224,28 @@ fn roundtrips_complete_pileup_annotations() {
         [PL, DP, SP, ADF, ADR, AD, SCR, QUALITY_SUM, QM]
     );
     assert_eq!(schema.decode_likelihood(&record).unwrap(), site);
+
+    let called = crate::MultiallelicCaller::default().call(&site).unwrap();
+    let called_schema = CalledVcfSchema::from_likelihood(&schema);
+    let called_record = called_schema.encode_call(&called).unwrap();
+    assert!(!called_schema.header().infos().contains_key(I16));
+    assert_eq!(called_record.info().get(I16), None);
+    assert_eq!(
+        called_record.info().get(MQ),
+        Some(Some(&InfoValue::Integer(43)))
+    );
+    assert!(called_record.info().get(DP4).is_some());
+    assert!(called_record.info().get(PV4).is_some());
+    assert_eq!(
+        called_record
+            .samples()
+            .keys()
+            .as_ref()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        [GT, PL, DP, SP, ADF, ADR, AD, SCR, QUALITY_SUM, QM, GP, GQ]
+    );
 }
 
 #[test]

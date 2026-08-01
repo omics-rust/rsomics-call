@@ -1,6 +1,6 @@
 use crate::{
-    CallError, CallPloidy, CalledSample, CalledSite, LikelihoodSite, Result, SampleEvidence,
-    SampleLikelihood,
+    CallError, CallPloidy, CalledAnnotations, CalledSample, CalledSite, LikelihoodSite, Result,
+    SampleEvidence, SampleLikelihood,
 };
 
 const THETA: f64 = 1e-3;
@@ -115,6 +115,7 @@ impl ConsensusCaller {
             allele_counts: allele_counts.into(),
             samples: samples.into(),
             indel_summary: site.indel_summary(),
+            annotations: site.annotations().map(CalledAnnotations::consensus),
         })
     }
 }

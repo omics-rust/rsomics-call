@@ -6,8 +6,9 @@ use noodles::sam::alignment::io::Write as _;
 use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
-    AlignmentInput, IndelLikelihoodConfig, LikelihoodSite, LikelihoodVariantReader,
-    LikelihoodVcfSchema, SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
+    AlignmentInput, CalledVcfSchema, IndelLikelihoodConfig, LikelihoodSite,
+    LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, SampleSelection,
+    SnpLikelihoodConfig, SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
 
@@ -145,6 +146,49 @@ fn assert_sites_match(actual: &[LikelihoodSite], expected: &[LikelihoodSite]) {
             actual.position()
         );
     }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn multiallelic_call_annotations_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let input = Path::new("tests/golden/bcftools-1.24-likelihood.vcf");
+    let data = fs::read(input).unwrap();
+    let mut likelihood_reader = LikelihoodVariantReader::new(&data[..]).unwrap();
+    let site = likelihood_reader.read_site().unwrap().unwrap();
+    assert!(likelihood_reader.read_site().unwrap().is_none());
+    let schema = CalledVcfSchema::from_likelihood(likelihood_reader.schema());
+    let actual = schema
+        .encode_call(&MultiallelicCaller::default().call(&site).unwrap())
+        .unwrap();
+
+    let output = Command::new(bcftools())
+        .args(["call", "-m", "-a", "PV4,GP,GQ", "-Ov"])
+        .arg(input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut reader = vcf::io::Reader::new(&output.stdout[..]);
+    let header = reader.read_header().unwrap();
+    let mut expected = vcf::variant::RecordBuf::default();
+    assert_ne!(reader.read_record_buf(&header, &mut expected).unwrap(), 0);
+    assert_eq!(
+        actual.reference_sequence_name(),
+        expected.reference_sequence_name()
+    );
+    assert_eq!(actual.variant_start(), expected.variant_start());
+    assert_eq!(actual.reference_bases(), expected.reference_bases());
+    assert_eq!(actual.alternate_bases(), expected.alternate_bases());
+    assert!((actual.quality_score().unwrap() - expected.quality_score().unwrap()).abs() < 1e-4);
+    assert_eq!(actual.info().as_ref().len(), expected.info().as_ref().len());
+    for (key, value) in expected.info().as_ref() {
+        assert_eq!(actual.info().as_ref().get(key), Some(value), "INFO/{key}");
+    }
+    assert_eq!(actual.samples().keys(), expected.samples().keys());
 }
 
 fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {

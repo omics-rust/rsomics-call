@@ -1,6 +1,6 @@
 use crate::{
-    CallError, CallPloidy, CalledSample, CalledSite, LikelihoodSite, Result, SampleEvidence,
-    SampleLikelihood,
+    CallError, CallPloidy, CalledAnnotations, CalledSample, CalledSite, LikelihoodSite, Result,
+    SampleEvidence, SampleLikelihood,
 };
 
 const PHRED_SCALE: f64 = 4.342_94;
@@ -211,6 +211,7 @@ impl MultiallelicCaller {
             allele_counts: allele_counts.into_boxed_slice(),
             samples: samples.into_boxed_slice(),
             indel_summary: site.indel_summary(),
+            annotations: site.annotations().map(CalledAnnotations::multiallelic),
         })
     }
 }

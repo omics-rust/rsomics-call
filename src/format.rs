@@ -26,8 +26,9 @@ use noodles::{
 };
 
 use crate::{
-    Allele, CallError, CalledSite, IndelSummary, LikelihoodSite, Ploidy, Result, SampleAnnotations,
-    SampleEvidence, SampleLikelihood, SiteAnnotations, model::SiteAnnotationValues,
+    Allele, CallError, CalledAnnotations, CalledSite, IndelSummary, LikelihoodSite, Ploidy, Result,
+    SampleAnnotations, SampleEvidence, SampleLikelihood, SiteAnnotations,
+    model::SiteAnnotationValues,
 };
 
 const QUALITY_SUM: &str = "QS";
@@ -59,6 +60,9 @@ const AN: &str = "AN";
 const GT: &str = "GT";
 const GQ: &str = "GQ";
 const GP: &str = "GP";
+const DP4: &str = "DP4";
+const MQ: &str = "MQ";
+const PV4: &str = "PV4";
 
 #[derive(Clone, Debug)]
 pub struct LikelihoodVcfSchema {
@@ -467,7 +471,11 @@ impl LikelihoodVcfSchema {
             .iter()
             .all(|sample| sample.evidence().annotations().is_some());
         if complete_sample_annotations {
-            insert_total_depth_annotations(&self.header, &mut info, site.samples())?;
+            insert_total_depth_annotations(
+                &self.header,
+                &mut info,
+                site.samples().iter().map(|sample| sample.evidence()),
+            )?;
         }
         let mut keys = vec![
             PL.to_owned(),
@@ -601,6 +609,7 @@ impl CalledVcfSchema {
     fn from_likelihood_inner(schema: &LikelihoodVcfSchema, include_probabilities: bool) -> Self {
         let mut header = schema.header.clone();
         header.infos_mut().shift_remove(QUALITY_SUM);
+        header.infos_mut().shift_remove(I16);
         header.infos_mut().insert(
             AC.to_owned(),
             Map::<Info>::new(
@@ -615,6 +624,34 @@ impl CalledVcfSchema {
                 InfoNumber::Count(1),
                 InfoType::Integer,
                 "Total number of alleles in called genotypes",
+            ),
+        );
+        header.infos_mut().insert(
+            DP4.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::Count(4),
+                InfoType::Integer,
+                "High-quality ref-forward, ref-reverse, alt-forward and alt-reverse bases",
+            ),
+        );
+        header.infos_mut().insert(
+            MQ.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::Count(1),
+                InfoType::Integer,
+                if include_probabilities {
+                    "Average mapping quality"
+                } else {
+                    "Root-mean-square mapping quality of covering reads"
+                },
+            ),
+        );
+        header.infos_mut().insert(
+            PV4.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::Count(4),
+                InfoType::Float,
+                "P-values for strand, base-quality, mapping-quality and tail-distance bias",
             ),
         );
         header.formats_mut().insert(
@@ -690,20 +727,47 @@ impl CalledVcfSchema {
             )),
         );
         insert_indel_info(&self.header, &mut info, site.indel_summary())?;
+        if let Some(annotations) = site.annotations() {
+            insert_called_annotations(&self.header, &mut info, annotations)?;
+        }
+        let complete_sample_annotations = site
+            .samples()
+            .iter()
+            .all(|sample| sample.evidence().annotations().is_some());
+        if complete_sample_annotations {
+            insert_total_depth_annotations(
+                &self.header,
+                &mut info,
+                site.samples().iter().map(|sample| sample.evidence()),
+            )?;
+        }
         let include_dp = self.header.formats().contains_key(DP);
         let include_ad = self.header.formats().contains_key(AD);
         let include_qs = self.header.formats().contains_key(QUALITY_SUM);
+        let include_sample_annotations = complete_sample_annotations
+            && [SP, ADF, ADR, SCR, QM]
+                .iter()
+                .all(|key| self.header.formats().contains_key(*key));
         let include_gp = self.header.formats().contains_key(GP);
         let include_gq = self.header.formats().contains_key(GQ);
         let mut keys = vec![GT.to_owned(), PL.to_owned()];
         if include_dp {
             keys.push(DP.to_owned());
         }
+        if include_sample_annotations {
+            keys.extend([SP, ADF, ADR].map(str::to_owned));
+        }
         if include_ad {
             keys.push(AD.to_owned());
         }
+        if include_sample_annotations {
+            keys.push(SCR.to_owned());
+        }
         if include_qs {
             keys.push(QUALITY_SUM.to_owned());
+        }
+        if include_sample_annotations {
+            keys.push(QM.to_owned());
         }
         if include_gp {
             keys.push(GP.to_owned());
@@ -738,13 +802,36 @@ impl CalledVcfSchema {
                         DP,
                     )?)));
                 }
+                if include_sample_annotations {
+                    let annotations = evidence.annotations().unwrap();
+                    values.extend([
+                        Some(SampleValue::Integer(checked_integer(
+                            annotations.strand_bias(),
+                            SP,
+                        )?)),
+                        Some(checked_array(annotations.forward_allele_depths(), ADF)?),
+                        Some(checked_array(annotations.reverse_allele_depths(), ADR)?),
+                    ]);
+                }
                 if include_ad {
                     values.push(Some(checked_array(evidence.allele_depths(), AD)?));
+                }
+                if include_sample_annotations {
+                    values.push(Some(SampleValue::Integer(checked_integer(
+                        evidence.annotations().unwrap().soft_clipped_reads(),
+                        SCR,
+                    )?)));
                 }
                 if include_qs {
                     values.push(Some(checked_array(
                         evidence.allele_quality_sums(),
                         QUALITY_SUM,
+                    )?));
+                }
+                if include_sample_annotations {
+                    values.push(Some(checked_array(
+                        evidence.annotations().unwrap().allele_quality_means(),
+                        QM,
                     )?));
                 }
                 if include_gp {
@@ -861,17 +948,38 @@ fn insert_site_annotations(
     )
 }
 
-fn insert_total_depth_annotations(
+fn insert_called_annotations(
     header: &vcf::Header,
     info: &mut RecordInfo,
-    samples: &[SampleLikelihood],
+    annotations: &CalledAnnotations,
 ) -> Result<()> {
-    let allele_count = samples[0].evidence().allele_depths().len();
+    insert_site_annotations(header, info, annotations.pileup())?;
+    let strand_depths = annotations
+        .strand_depths()
+        .iter()
+        .copied()
+        .map(u64::from)
+        .collect::<Vec<_>>();
+    insert_info_integer_array(header, info, DP4, &strand_depths)?;
+    insert_info_integer(header, info, MQ, annotations.mapping_quality())?;
+    if let Some(values) = annotations.bias_probabilities() {
+        insert_info_float_array(header, info, PV4, values)?;
+    }
+    Ok(())
+}
+
+fn insert_total_depth_annotations<'a>(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    samples: impl IntoIterator<Item = &'a SampleEvidence>,
+) -> Result<()> {
+    let samples = samples.into_iter().collect::<Vec<_>>();
+    let allele_count = samples[0].allele_depths().len();
     let mut forward = vec![0u64; allele_count];
     let mut reverse = vec![0u64; allele_count];
     let mut soft_clipped_reads = 0u64;
     for sample in samples {
-        let annotations = sample.evidence().annotations().unwrap();
+        let annotations = sample.annotations().unwrap();
         for (total, &value) in forward.iter_mut().zip(annotations.forward_allele_depths()) {
             *total += u64::from(value);
         }

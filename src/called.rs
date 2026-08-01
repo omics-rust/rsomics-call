@@ -1,4 +1,4 @@
-use crate::{Allele, IndelSummary, SampleEvidence};
+use crate::{Allele, CalledAnnotations, IndelSummary, SampleEvidence};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallPloidy {
@@ -63,6 +63,7 @@ pub struct CalledSite {
     pub(crate) allele_counts: Box<[u32]>,
     pub(crate) samples: Box<[CalledSample]>,
     pub(crate) indel_summary: Option<IndelSummary>,
+    pub(crate) annotations: Option<CalledAnnotations>,
 }
 
 impl CalledSite {
@@ -103,6 +104,10 @@ impl CalledSite {
 
     pub fn indel_summary(&self) -> Option<IndelSummary> {
         self.indel_summary
+    }
+
+    pub fn annotations(&self) -> Option<&CalledAnnotations> {
+        self.annotations.as_ref()
     }
 
     pub fn is_variant(&self) -> bool {
