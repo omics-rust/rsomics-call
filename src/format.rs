@@ -63,6 +63,8 @@ const GP: &str = "GP";
 const DP4: &str = "DP4";
 const MQ: &str = "MQ";
 const PV4: &str = "PV4";
+const END: &str = "END";
+const MIN_DP: &str = "MIN_DP";
 
 #[derive(Clone, Debug)]
 pub struct LikelihoodVcfSchema {
@@ -606,6 +608,26 @@ impl CalledVcfSchema {
         Self::from_likelihood_inner(schema, false)
     }
 
+    pub fn with_gvcf(mut self) -> Self {
+        self.header.infos_mut().insert(
+            END.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::Count(1),
+                InfoType::Integer,
+                "End position of the variant described in this record",
+            ),
+        );
+        self.header.infos_mut().insert(
+            MIN_DP.to_owned(),
+            Map::<Info>::new(
+                InfoNumber::Count(1),
+                InfoType::Integer,
+                "Minimum per-sample depth in this gVCF block",
+            ),
+        );
+        self
+    }
+
     fn from_likelihood_inner(schema: &LikelihoodVcfSchema, include_probabilities: bool) -> Self {
         let mut header = schema.header.clone();
         header.infos_mut().shift_remove(QUALITY_SUM);
@@ -706,6 +728,18 @@ impl CalledVcfSchema {
                 .map(|allele| allele_text(allele).map(str::to_owned))
                 .collect::<Result<Vec<_>>>()?,
         );
+        if let Some(gvcf) = site.gvcf()
+            && gvcf.is_collapsed()
+        {
+            return encode_gvcf_block(
+                &self.header,
+                reference_name,
+                position,
+                alternate_bases,
+                site,
+                gvcf,
+            );
+        }
         let allele_counts = site
             .allele_counts()
             .iter()
@@ -729,6 +763,9 @@ impl CalledVcfSchema {
         insert_indel_info(&self.header, &mut info, site.indel_summary())?;
         if let Some(annotations) = site.annotations() {
             insert_called_annotations(&self.header, &mut info, annotations)?;
+        }
+        if let Some(gvcf) = site.gvcf() {
+            insert_gvcf_info(&self.header, &mut info, gvcf)?;
         }
         let complete_sample_annotations = site
             .samples()
@@ -863,6 +900,99 @@ impl CalledVcfSchema {
         }
         Ok(builder.build())
     }
+}
+
+fn encode_gvcf_block(
+    header: &vcf::Header,
+    reference_name: &str,
+    position: Position,
+    alternate_bases: AlternateBases,
+    site: &CalledSite,
+    gvcf: crate::GvcfSite,
+) -> Result<vcf::variant::RecordBuf> {
+    require_format(header, GT, FormatNumber::Count(1), FormatType::String, true)?;
+    require_format(
+        header,
+        DP,
+        FormatNumber::Count(1),
+        FormatType::Integer,
+        true,
+    )?;
+    let include_pl = site
+        .samples()
+        .iter()
+        .any(|sample| sample.phred_likelihoods().is_some());
+    if include_pl {
+        require_format(header, PL, FormatNumber::Samples, FormatType::Integer, true)?;
+    }
+
+    let mut info = RecordInfo::default();
+    insert_gvcf_info(header, &mut info, gvcf)?;
+    let mut keys = vec![GT.to_owned()];
+    if include_pl {
+        keys.push(PL.to_owned());
+    }
+    keys.push(DP.to_owned());
+    let values = site
+        .samples()
+        .iter()
+        .map(|sample| {
+            let genotype = sample.genotype().map(|alleles| {
+                Genotype::from_iter(
+                    alleles
+                        .iter()
+                        .copied()
+                        .map(|allele| GenotypeAllele::new(Some(allele), Phasing::Unphased)),
+                )
+            });
+            let mut values = vec![genotype.map(SampleValue::Genotype)];
+            if include_pl {
+                values.push(
+                    sample
+                        .phred_likelihoods()
+                        .map(|values| checked_array(values, PL))
+                        .transpose()?,
+                );
+            }
+            values.push(Some(SampleValue::Integer(checked_integer(
+                sample.evidence().depth(),
+                DP,
+            )?)));
+            Ok(values)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(vcf::variant::RecordBuf::builder()
+        .set_reference_sequence_name(reference_name)
+        .set_variant_start(position)
+        .set_reference_bases(allele_text(site.reference())?)
+        .set_alternate_bases(alternate_bases)
+        .set_info(info)
+        .set_samples(Samples::new(Keys::from_iter(keys), values))
+        .build())
+}
+
+fn insert_gvcf_info(
+    header: &vcf::Header,
+    info: &mut RecordInfo,
+    gvcf: crate::GvcfSite,
+) -> Result<()> {
+    if let Some(end_position) = gvcf.end_position() {
+        require_info(header, END, InfoNumber::Count(1), InfoType::Integer)?;
+        let end = end_position
+            .checked_add(1)
+            .and_then(|value| i32::try_from(value).ok())
+            .ok_or_else(|| invalid("gVCF block end exceeds the VCF integer range"))?;
+        info.insert(END.to_owned(), Some(InfoValue::Integer(end)));
+    }
+    require_info(header, MIN_DP, InfoNumber::Count(1), InfoType::Integer)?;
+    info.insert(
+        MIN_DP.to_owned(),
+        Some(InfoValue::Integer(checked_info_integer(
+            gvcf.minimum_depth(),
+            MIN_DP,
+        )?)),
+    );
+    Ok(())
 }
 
 fn require_info(header: &vcf::Header, key: &str, number: InfoNumber, ty: InfoType) -> Result<()> {

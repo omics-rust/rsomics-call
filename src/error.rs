@@ -139,6 +139,18 @@ pub enum CallError {
     #[error("the prior chromosome count is outside the cohort ploidy range")]
     InvalidPriorChromosomeCount,
 
+    #[error("gVCF depth thresholds must be strictly increasing")]
+    InvalidGvcfThresholds,
+
+    #[error("gVCF input sites are not in reference and coordinate order")]
+    InvalidGvcfOrder,
+
+    #[error("gVCF block sites have different sample counts")]
+    GvcfSampleCountMismatch,
+
+    #[error("present gVCF block likelihoods must contain three diploid values per sample")]
+    InvalidGvcfLikelihoods,
+
     #[error("called allele count exceeds the supported range")]
     CalledAlleleCountOverflow,
 

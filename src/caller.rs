@@ -212,6 +212,7 @@ impl MultiallelicCaller {
             samples: samples.into_boxed_slice(),
             indel_summary: site.indel_summary(),
             annotations: site.annotations().map(CalledAnnotations::multiallelic),
+            gvcf: None,
         })
     }
 }

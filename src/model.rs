@@ -212,6 +212,10 @@ impl SampleEvidence {
         }
         Ok(evidence)
     }
+
+    pub(crate) fn set_depth(&mut self, depth: u32) {
+        self.depth = depth;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

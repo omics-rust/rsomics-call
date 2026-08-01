@@ -116,6 +116,7 @@ impl ConsensusCaller {
             samples: samples.into(),
             indel_summary: site.indel_summary(),
             annotations: site.annotations().map(CalledAnnotations::consensus),
+            gvcf: None,
         })
     }
 }

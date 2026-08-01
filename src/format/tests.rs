@@ -403,3 +403,71 @@ fn encodes_reference_calls_without_an_empty_ac_field() {
     assert_eq!(fields[7], "AN=2");
     assert_eq!(fields[9], "0/0:.:1:1:40:.:0");
 }
+
+#[test]
+fn encodes_low_depth_records_and_collapsed_gvcf_blocks() {
+    let likelihood_schema =
+        LikelihoodVcfSchema::new([(b"chr1".as_slice(), 5)], ["sample"]).unwrap();
+    let reference_call = |position, depth| {
+        let likelihood = LikelihoodSite::new(
+            0,
+            position,
+            Allele::new(&b"A"[..]).unwrap(),
+            [Allele::new(&b"<*>"[..]).unwrap()],
+            [1.0, 0.0],
+            [SampleLikelihood::observed(
+                Ploidy::new(2).unwrap(),
+                [0, 3, 40],
+                SampleEvidence::new(depth, [depth, 0], [depth * 40, 0]).unwrap(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        crate::MultiallelicCaller::default()
+            .call(&likelihood)
+            .unwrap()
+    };
+    let mut blocker = crate::GvcfBlocker::new([5]).unwrap();
+    let mut calls = Vec::new();
+    for call in [
+        reference_call(0, 1),
+        reference_call(1, 10),
+        reference_call(2, 8),
+    ] {
+        blocker
+            .push(call, |call| {
+                calls.push(call);
+                Ok(())
+            })
+            .unwrap();
+    }
+    blocker
+        .finish(|call| {
+            calls.push(call);
+            Ok(())
+        })
+        .unwrap();
+
+    let schema = CalledVcfSchema::from_likelihood(&likelihood_schema).with_gvcf();
+    assert!(schema.header().infos().contains_key(END));
+    assert!(schema.header().infos().contains_key(MIN_DP));
+    let lines = calls
+        .iter()
+        .map(|call| {
+            let record = schema.encode_call(call).unwrap();
+            let mut data = Vec::new();
+            let mut writer = vcf::io::Writer::new(&mut data);
+            writer
+                .write_variant_record(schema.header(), &record)
+                .unwrap();
+            String::from_utf8(data).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "chr1\t1\t.\tA\t.\t69.58696\t.\tAN=2;MIN_DP=1\tGT:PL:DP:AD:QS:GP:GQ\t0/0:.:1:1:40:.:0\n",
+            "chr1\t2\t.\tA\t.\t.\t.\tEND=3;MIN_DP=8\tGT:DP\t0/0:8\n",
+        ]
+    );
+}

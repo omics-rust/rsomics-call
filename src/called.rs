@@ -27,6 +27,35 @@ pub struct CalledSample {
     pub(crate) evidence: SampleEvidence,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GvcfSite {
+    end_position: Option<u64>,
+    minimum_depth: u32,
+    collapsed: bool,
+}
+
+impl GvcfSite {
+    pub(crate) fn new(end_position: Option<u64>, minimum_depth: u32, collapsed: bool) -> Self {
+        Self {
+            end_position,
+            minimum_depth,
+            collapsed,
+        }
+    }
+
+    pub fn end_position(self) -> Option<u64> {
+        self.end_position
+    }
+
+    pub fn minimum_depth(self) -> u32 {
+        self.minimum_depth
+    }
+
+    pub fn is_collapsed(self) -> bool {
+        self.collapsed
+    }
+}
+
 impl CalledSample {
     pub fn ploidy(&self) -> CallPloidy {
         self.ploidy
@@ -64,6 +93,7 @@ pub struct CalledSite {
     pub(crate) samples: Box<[CalledSample]>,
     pub(crate) indel_summary: Option<IndelSummary>,
     pub(crate) annotations: Option<CalledAnnotations>,
+    pub(crate) gvcf: Option<GvcfSite>,
 }
 
 impl CalledSite {
@@ -108,6 +138,10 @@ impl CalledSite {
 
     pub fn annotations(&self) -> Option<&CalledAnnotations> {
         self.annotations.as_ref()
+    }
+
+    pub fn gvcf(&self) -> Option<GvcfSite> {
+        self.gvcf
     }
 
     pub fn is_variant(&self) -> bool {

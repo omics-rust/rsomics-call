@@ -6,7 +6,7 @@ use noodles::sam::alignment::io::Write as _;
 use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
-    AlignmentInput, CalledVcfSchema, IndelLikelihoodConfig, LikelihoodSite,
+    AlignmentInput, CalledVcfSchema, GvcfBlocker, IndelLikelihoodConfig, LikelihoodSite,
     LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, PloidyDefinition,
     PloidyPreset, SamplePloidy, SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
 };
@@ -189,6 +189,78 @@ fn multiallelic_call_annotations_match_bcftools_1_24() {
         assert_eq!(actual.info().as_ref().get(key), Some(value), "INFO/{key}");
     }
     assert_eq!(actual.samples().keys(), expected.samples().keys());
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn gvcf_depth_blocks_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("likelihoods.vcf");
+    let mut data = "##fileformat=VCFv4.2\n\
+                    ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+                    ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n\
+                    ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+                    ##contig=<ID=chr1,length=10>\n\
+                    #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n"
+        .to_owned();
+    for (position, depth) in [(1, 10), (2, 8), (3, 20), (4, 18)] {
+        data.push_str(&format!(
+            "chr1\t{position}\t.\tA\t<*>\t.\t.\tQS=1,0\tPL:DP\t0,100,200:{depth}\n"
+        ));
+    }
+    fs::write(&input, data).unwrap();
+
+    let output = Command::new(bcftools())
+        .args(["call", "-m", "-g", "5,15", "-Ov"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    let input = fs::read(&input).unwrap();
+    let mut reader = LikelihoodVariantReader::new(&input[..]).unwrap();
+    let schema = CalledVcfSchema::from_likelihood(reader.schema()).with_gvcf();
+    let caller = MultiallelicCaller::default();
+    let mut blocker = GvcfBlocker::new([5, 15]).unwrap();
+    let mut calls = Vec::new();
+    while let Some(site) = reader.read_site().unwrap() {
+        blocker
+            .push(caller.call(&site).unwrap(), |call| {
+                calls.push(call);
+                Ok(())
+            })
+            .unwrap();
+    }
+    blocker
+        .finish(|call| {
+            calls.push(call);
+            Ok(())
+        })
+        .unwrap();
+    let actual = calls
+        .iter()
+        .map(|call| {
+            let record = schema.encode_call(call).unwrap();
+            let mut data = Vec::new();
+            let mut writer = vcf::io::Writer::new(&mut data);
+            writer
+                .write_variant_record(schema.header(), &record)
+                .unwrap();
+            String::from_utf8(data).unwrap().trim_end().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 }
 
 #[test]

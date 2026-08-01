@@ -10,6 +10,7 @@ mod errmod;
 mod error;
 mod format;
 mod glocal;
+mod gvcf;
 mod indel;
 mod model;
 mod ploidy;
@@ -22,12 +23,13 @@ mod target_file;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use call_annotation::CalledAnnotations;
-pub use called::{CallPloidy, CalledSample, CalledSite};
+pub use called::{CallPloidy, CalledSample, CalledSite, GvcfSite};
 pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};
 pub use consensus::{ConsensusCaller, ConsensusCallerConfig};
 pub use errmod::{BaseObservation, ErrorModel, LikelihoodMatrix, Nucleotide};
 pub use error::{CallError, Result};
 pub use format::{CalledVcfSchema, LikelihoodVcfSchema};
+pub use gvcf::GvcfBlocker;
 pub use indel::{IndelLikelihoodConfig, IndelSiteBuilder};
 pub use model::{
     Allele, IndelSummary, LikelihoodSite, Ploidy, SampleAnnotations, SampleEvidence,
