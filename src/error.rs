@@ -48,6 +48,16 @@ pub enum CallError {
     #[error("selected sample is absent from the input: {0}")]
     MissingSelectedSample(String),
 
+    #[error("call sample input {path}: {message}")]
+    CallSampleInput { path: String, message: String },
+
+    #[error("call sample input {path} line {line}: {message}")]
+    CallSampleRecord {
+        path: String,
+        line: u64,
+        message: String,
+    },
+
     #[error("likelihood sample selection must be configured before reading records")]
     LateLikelihoodSampleSelection,
 

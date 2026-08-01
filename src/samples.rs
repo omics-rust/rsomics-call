@@ -247,7 +247,7 @@ struct SourceSamples {
     read_groups: HashMap<Box<[u8]>, Option<usize>>,
 }
 
-fn validate_sample_name(name: &str) -> Result<()> {
+pub(crate) fn validate_sample_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name
             .bytes()

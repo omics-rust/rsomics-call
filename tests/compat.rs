@@ -6,10 +6,10 @@ use noodles::sam::alignment::io::Write as _;
 use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
-    AlignmentInput, CallModel, CalledVcfSchema, GvcfBlocker, IndelLikelihoodConfig,
-    LikelihoodCallRun, LikelihoodSite, LikelihoodVariantReader, LikelihoodVcfSchema,
-    MultiallelicCaller, MultiallelicCallerConfig, PloidyDefinition, PloidyPreset, SamplePloidy,
-    SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
+    AlignmentInput, CallModel, CallSampleSelection, CalledVcfSchema, GvcfBlocker,
+    IndelLikelihoodConfig, LikelihoodCallRun, LikelihoodSite, LikelihoodVariantReader,
+    LikelihoodVcfSchema, MultiallelicCaller, MultiallelicCallerConfig, PloidyDefinition,
+    PloidyPreset, SamplePloidy, SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
 
@@ -315,6 +315,64 @@ fn likelihood_sample_projection_matches_bcftools_1_24() {
             sample_call_signature(&expected.stdout)
         );
     }
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn call_sample_file_binding_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("samples.vcf");
+    let samples = directory.path().join("samples.txt");
+    let ploidy = directory.path().join("ploidy.txt");
+    fs::write(
+        &input,
+        "##fileformat=VCFv4.2\n\
+         ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+         ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n\
+         ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+         ##contig=<ID=chr1,length=10>\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tfirst\tsecond\tthird\n\
+         chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t0,3,40,3,40,40:1\t40,3,0,40,3,40:2\t20,0,20,40,40,40:3\n",
+    )
+    .unwrap();
+    fs::write(&samples, "third H\nfirst D\n").unwrap();
+    fs::write(&ploidy, "* * * H 1\n* * * D 2\n").unwrap();
+
+    let expected = Command::new(bcftools())
+        .args(["call", "-m", "--ploidy-file"])
+        .arg(&ploidy)
+        .arg("-S")
+        .arg(&samples)
+        .arg("-Ov")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+
+    let data = fs::read(&input).unwrap();
+    let definition = PloidyDefinition::read(&ploidy).unwrap();
+    let selection = CallSampleSelection::read(&samples).unwrap();
+    let (reader, resolver) = selection
+        .bind(
+            LikelihoodVariantReader::new(&data[..]).unwrap(),
+            &definition,
+        )
+        .unwrap();
+    let actual = LikelihoodCallRun::new(
+        CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+        resolver,
+    )
+    .run(reader, Vec::new(), rsomics_call::VariantOutputFormat::Vcf)
+    .unwrap();
+    assert_eq!(
+        sample_call_signature(&actual),
+        sample_call_signature(&expected.stdout)
+    );
 }
 
 #[test]

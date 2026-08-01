@@ -191,11 +191,15 @@ impl PloidyDefinition {
     }
 
     pub fn default_resolver(&self, sample_count: usize) -> Result<PloidyResolver> {
-        let sex = self
-            .default_sex
+        let assignment = self.default_assignment()?;
+        self.resolver((0..sample_count).map(|_| assignment.clone()))
+    }
+
+    pub(crate) fn default_assignment(&self) -> Result<SamplePloidy> {
+        self.default_sex
             .as_ref()
-            .ok_or_else(|| CallError::UnknownPloidySex("default".to_owned()))?;
-        self.resolver((0..sample_count).map(|_| SamplePloidy::Sex(sex.clone())))
+            .map(|sex| SamplePloidy::Sex(sex.clone()))
+            .ok_or_else(|| CallError::UnknownPloidySex("default".to_owned()))
     }
 
     fn ploidy(&self, reference: &str, position: u64, sex: &str) -> Result<CallPloidy> {

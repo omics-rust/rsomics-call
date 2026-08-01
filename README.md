@@ -36,10 +36,12 @@ allele-indexed fields when callers trim alternates. Typed ploidy resolution
 supports constant, GRCh37, GRCh38, and checked custom definitions with
 sex-aware or fixed sample assignments and allocation-free repeated queries. It
 also groups consecutive reference calls into bcftools-compatible gVCF depth
-blocks with typed `END` and `MIN_DP` output. It does not yet expose a
-command-line binary. Incomplete commands stay absent until sample-selection
-and complete command orchestration, target-exclusion policy, and oracle and
-performance gates pass.
+blocks with typed `END` and `MIN_DP` output. Likelihood sample selection is
+projected during record decoding, while call sample files preserve requested
+order and bind explicit sex or fixed ploidy through the same definition. It
+does not yet expose a command-line binary. Incomplete commands stay absent
+until complete command orchestration, call-stage region and target selection,
+target-exclusion policy, and oracle and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
