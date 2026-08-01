@@ -154,6 +154,12 @@ pub enum CallError {
     #[error("present gVCF block likelihoods must contain three diploid values per sample")]
     InvalidGvcfLikelihoods,
 
+    #[error("gVCF blocks require the multiallelic calling model")]
+    UnsupportedGvcfModel,
+
+    #[error("gVCF input requires a FORMAT/DP definition")]
+    MissingGvcfDepth,
+
     #[error("called allele count exceeds the supported range")]
     CalledAlleleCountOverflow,
 

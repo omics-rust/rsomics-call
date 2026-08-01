@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -10,10 +9,9 @@ use noodles::{
 use rsomics_pileup::{BaqOptions, PileupEngine, PileupOptions};
 
 use crate::{
-    AlignmentInput, AlignmentSet, CallError, CalledSite, CalledVariantWriter, CalledVcfSchema,
-    IndelLikelihoodConfig, IndelSiteBuilder, LikelihoodSite, LikelihoodVariantReader, Nucleotide,
-    ReferenceSequence, Result, SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder,
-    VariantOutputFormat,
+    AlignmentInput, AlignmentSet, CallError, CalledSite, IndelLikelihoodConfig, IndelSiteBuilder,
+    LikelihoodSite, Nucleotide, ReferenceSequence, Result, SampleMap, SampleSelection,
+    SnpLikelihoodConfig, SnpSiteBuilder,
     alignment::IndexedAlignmentSet,
     selection::{ReferenceRange, RegionSelection, TargetSet, normalize_regions},
 };
@@ -245,29 +243,6 @@ impl SnpLikelihoodRun {
     }
 }
 
-pub fn run_likelihood_calls<R, W>(
-    mut reader: LikelihoodVariantReader<R>,
-    writer: W,
-    output_schema: CalledVcfSchema,
-    output_format: VariantOutputFormat,
-    mut call: impl FnMut(&LikelihoodSite) -> Result<CalledSite>,
-) -> Result<W>
-where
-    R: Read,
-    W: Write,
-{
-    let mut writer = CalledVariantWriter::new(writer, output_schema, output_format)?;
-    while let Some(site) = reader.read_site()? {
-        let record = reader.record_number();
-        let called = call(&site).map_err(|error| CallError::LikelihoodCallRecord {
-            record,
-            source: Box::new(error),
-        })?;
-        writer.write_site(&called)?;
-    }
-    writer.finish()
-}
-
 struct LikelihoodPipeline<'a> {
     pileup: &'a mut PileupEngine,
     reference: &'a mut ReferenceCache,
@@ -489,8 +464,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        Allele, ConsensusCaller, IndelSummary, LikelihoodVariantWriter, LikelihoodVcfSchema,
-        Ploidy, SampleEvidence, SampleLikelihood,
+        Allele, CalledVcfSchema, ConsensusCaller, IndelSummary, LikelihoodVariantReader,
+        LikelihoodVariantWriter, LikelihoodVcfSchema, Ploidy, SampleEvidence, SampleLikelihood,
+        VariantOutputFormat, run_likelihood_calls,
     };
 
     fn sam_file(sample: &str, base: char) -> NamedTempFile {

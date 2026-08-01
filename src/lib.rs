@@ -3,6 +3,7 @@
 mod alignment;
 mod annotation;
 mod call_annotation;
+mod call_run;
 mod called;
 mod caller;
 mod consensus;
@@ -23,6 +24,7 @@ mod target_file;
 
 pub use alignment::{AlignmentInput, AlignmentSet, ReferenceSequence};
 pub use call_annotation::CalledAnnotations;
+pub use call_run::{CallModel, LikelihoodCallRun, run_likelihood_calls};
 pub use called::{CallPloidy, CalledSample, CalledSite, GvcfSite};
 pub use caller::{MultiallelicCaller, MultiallelicCallerConfig};
 pub use consensus::{ConsensusCaller, ConsensusCallerConfig};
@@ -36,7 +38,7 @@ pub use model::{
     SampleLikelihood, SiteAnnotations,
 };
 pub use ploidy::{PloidyDefinition, PloidyPreset, PloidyResolver, SamplePloidy};
-pub use run::{SnpLikelihoodRun, run_likelihood_calls};
+pub use run::SnpLikelihoodRun;
 pub use samples::{SampleMap, SampleMapBuilder, SampleSelection};
 pub use snp::{SnpEvidence, SnpLikelihoodConfig, SnpSiteBuilder};
 pub use stream::{
