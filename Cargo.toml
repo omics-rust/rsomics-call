@@ -25,6 +25,7 @@ rsomics-common = "0.10"
 rsomics-help = "0.4"
 rsomics-pileup = "0.4"
 same-file = "1"
+smallvec = "1"
 thiserror = "2"
 
 [dev-dependencies]

@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 
 use rsomics_bamio::raw::RawRecord;
 use rsomics_pileup::PileupRead;
+use smallvec::SmallVec;
 
 use crate::{CallError, Result, SampleAnnotations, SiteAnnotations, model::SiteAnnotationValues};
 
@@ -9,7 +10,6 @@ const ALLELE_COUNT: usize = 5;
 const POSITION_BINS: usize = 100;
 const QUALITY_BINS: usize = 60;
 const MISMATCH_BINS: usize = 32;
-const REVERSE: u16 = 0x10;
 const EMPTY_POSITION_BINS: [u64; POSITION_BINS] = [0; POSITION_BINS];
 const EMPTY_QUALITY_BINS: [u64; QUALITY_BINS] = [0; QUALITY_BINS];
 static ERROR_PROBABILITIES: LazyLock<[f64; 64]> =
@@ -66,10 +66,12 @@ impl CigarMetrics {
 pub(crate) struct AnnotationObservation {
     pub(crate) allele: usize,
     pub(crate) is_reference: bool,
+    pub(crate) reverse: bool,
     pub(crate) base_quality: u8,
     pub(crate) raw_mapping_quality: u8,
     pub(crate) mapping_quality: u8,
     pub(crate) effective_quality: u8,
+    pub(crate) tail_distance: u8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -201,21 +203,17 @@ impl AnnotationEvidence {
         }
     }
 
-    pub(crate) fn observe(
-        &mut self,
-        record: &RawRecord,
-        projection: &PileupRead,
-        observation: AnnotationObservation,
-    ) {
+    pub(crate) fn observe(&mut self, observation: AnnotationObservation) {
         let AnnotationObservation {
             allele,
             is_reference,
+            reverse,
             base_quality,
             raw_mapping_quality,
             mapping_quality,
             effective_quality,
+            tail_distance,
         } = observation;
-        let reverse = record.flags() & REVERSE != 0;
         if allele < 4 {
             if reverse {
                 self.reverse[allele] += 1;
@@ -233,10 +231,7 @@ impl AnnotationEvidence {
         self.auxiliary[8 + difference * 2] += u64::from(mapping_quality);
         self.auxiliary[9 + difference * 2] += u64::from(mapping_quality).pow(2);
 
-        let tail_distance = projection
-            .qpos
-            .min(record.sequence_len() - 1 - projection.qpos)
-            .min(25) as u64;
+        let tail_distance = u64::from(tail_distance);
         self.auxiliary[12 + difference * 2] += tail_distance;
         self.auxiliary[13 + difference * 2] += tail_distance * tail_distance;
 
@@ -257,11 +252,11 @@ impl AnnotationEvidence {
             .get_or_insert_with(|| Box::new(DetailedAnnotationEvidence::default()));
         let AnnotationObservation {
             is_reference,
+            reverse,
             base_quality,
             mapping_quality,
             ..
         } = observation;
-        let reverse = record.flags() & REVERSE != 0;
         let difference = usize::from(!is_reference);
         let geometry = ReadGeometry::new(record.sequence_len(), projection.qpos, cigar);
         let position = geometry.position_bin();
@@ -310,7 +305,7 @@ impl AnnotationEvidence {
                         .min(f64::from(i32::MAX)) as u32
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[u32; 5]>>();
         let [
             forward_reference,
             reverse_reference,
@@ -332,13 +327,13 @@ impl AnnotationEvidence {
             );
             (-4.343 * two_tail.ln() + 0.499).min(255.0) as u32
         };
-        SampleAnnotations::new(
+        Ok(SampleAnnotations::from_generated(
             forward,
             reverse,
             quality_means,
             strand_bias,
             checked_u32(self.soft_clipped_reads)?,
-        )
+        ))
     }
 
     fn strand_counts(&self) -> [u64; 4] {
@@ -581,7 +576,10 @@ pub(crate) fn site_annotations<'a>(
     })
 }
 
-pub(crate) fn selected_counts(values: &[u64; ALLELE_COUNT], alleles: &[usize]) -> Result<Vec<u32>> {
+pub(crate) fn selected_counts(
+    values: &[u64; ALLELE_COUNT],
+    alleles: &[usize],
+) -> Result<SmallVec<[u32; 5]>> {
     alleles
         .iter()
         .map(|&allele| checked_u32(values[allele]))

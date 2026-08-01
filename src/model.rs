@@ -1,13 +1,15 @@
 use std::num::NonZeroU8;
 
+use smallvec::SmallVec;
+
 use crate::{CallError, Result};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Allele(Box<[u8]>);
+pub struct Allele(SmallVec<[u8; 8]>);
 
 impl Allele {
-    pub fn new(value: impl Into<Box<[u8]>>) -> Result<Self> {
-        let value = value.into();
+    pub fn new(value: impl AsRef<[u8]>) -> Result<Self> {
+        let value = value.as_ref();
         let symbolic = value.len() > 2
             && value.starts_with(b"<")
             && value.ends_with(b">")
@@ -15,16 +17,16 @@ impl Allele {
                 .iter()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"*_:.-".contains(byte));
         let valid = !value.is_empty()
-            && (value.as_ref() == b"*"
+            && (value == b"*"
                 || symbolic
                 || value
                     .iter()
                     .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T' | b'N')));
         if valid {
-            Ok(Self(value))
+            Ok(Self(SmallVec::from_slice(value)))
         } else {
             Err(CallError::InvalidAllele(
-                String::from_utf8_lossy(&value).into_owned(),
+                String::from_utf8_lossy(value).into_owned(),
             ))
         }
     }
@@ -51,37 +53,53 @@ impl Ploidy {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SampleAnnotations {
-    forward_allele_depths: Box<[u32]>,
-    reverse_allele_depths: Box<[u32]>,
-    allele_quality_means: Box<[u32]>,
+    forward_allele_depths: SmallVec<[u32; 5]>,
+    reverse_allele_depths: SmallVec<[u32; 5]>,
+    allele_quality_means: SmallVec<[u32; 5]>,
     strand_bias: u32,
     soft_clipped_reads: u32,
 }
 
 impl SampleAnnotations {
     pub fn new(
-        forward_allele_depths: impl Into<Box<[u32]>>,
-        reverse_allele_depths: impl Into<Box<[u32]>>,
-        allele_quality_means: impl Into<Box<[u32]>>,
+        forward_allele_depths: impl IntoIterator<Item = u32>,
+        reverse_allele_depths: impl IntoIterator<Item = u32>,
+        allele_quality_means: impl IntoIterator<Item = u32>,
         strand_bias: u32,
         soft_clipped_reads: u32,
     ) -> Result<Self> {
-        let forward_allele_depths = forward_allele_depths.into();
-        let reverse_allele_depths = reverse_allele_depths.into();
-        let allele_quality_means = allele_quality_means.into();
+        let forward_allele_depths = forward_allele_depths.into_iter().collect::<SmallVec<_>>();
+        let reverse_allele_depths = reverse_allele_depths.into_iter().collect::<SmallVec<_>>();
+        let allele_quality_means = allele_quality_means.into_iter().collect::<SmallVec<_>>();
         if forward_allele_depths.is_empty()
             || reverse_allele_depths.len() != forward_allele_depths.len()
             || allele_quality_means.len() != forward_allele_depths.len()
         {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
-        Ok(Self {
+        Ok(Self::from_generated(
             forward_allele_depths,
             reverse_allele_depths,
             allele_quality_means,
             strand_bias,
             soft_clipped_reads,
-        })
+        ))
+    }
+
+    pub(crate) fn from_generated(
+        forward_allele_depths: SmallVec<[u32; 5]>,
+        reverse_allele_depths: SmallVec<[u32; 5]>,
+        allele_quality_means: SmallVec<[u32; 5]>,
+        strand_bias: u32,
+        soft_clipped_reads: u32,
+    ) -> Self {
+        Self {
+            forward_allele_depths,
+            reverse_allele_depths,
+            allele_quality_means,
+            strand_bias,
+            soft_clipped_reads,
+        }
     }
 
     pub fn forward_allele_depths(&self) -> &[u32] {
@@ -129,28 +147,40 @@ impl SampleAnnotations {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SampleEvidence {
     depth: u32,
-    allele_depths: Box<[u32]>,
-    allele_quality_sums: Box<[u32]>,
+    allele_depths: SmallVec<[u32; 5]>,
+    allele_quality_sums: SmallVec<[u32; 5]>,
     annotations: Option<SampleAnnotations>,
 }
 
 impl SampleEvidence {
     pub fn new(
         depth: u32,
-        allele_depths: impl Into<Box<[u32]>>,
-        allele_quality_sums: impl Into<Box<[u32]>>,
+        allele_depths: impl IntoIterator<Item = u32>,
+        allele_quality_sums: impl IntoIterator<Item = u32>,
     ) -> Result<Self> {
-        let allele_depths = allele_depths.into();
-        let allele_quality_sums = allele_quality_sums.into();
+        let allele_depths = allele_depths.into_iter().collect::<SmallVec<_>>();
+        let allele_quality_sums = allele_quality_sums.into_iter().collect::<SmallVec<_>>();
         if allele_depths.is_empty() || allele_quality_sums.len() != allele_depths.len() {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
-        Ok(Self {
+        Ok(Self::from_generated(
+            depth,
+            allele_depths,
+            allele_quality_sums,
+        ))
+    }
+
+    pub(crate) fn from_generated(
+        depth: u32,
+        allele_depths: SmallVec<[u32; 5]>,
+        allele_quality_sums: SmallVec<[u32; 5]>,
+    ) -> Self {
+        Self {
             depth,
             allele_depths,
             allele_quality_sums,
             annotations: None,
-        })
+        }
     }
 
     pub fn with_annotations(mut self, annotations: SampleAnnotations) -> Result<Self> {
@@ -170,8 +200,17 @@ impl SampleEvidence {
         Ok(self)
     }
 
+    pub(crate) fn with_generated_annotations(mut self, annotations: SampleAnnotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
     pub fn empty(allele_count: usize) -> Result<Self> {
-        Self::new(0, vec![0; allele_count], vec![0; allele_count])
+        Self::new(
+            0,
+            std::iter::repeat_n(0, allele_count),
+            std::iter::repeat_n(0, allele_count),
+        )
     }
 
     pub fn allele_depths(&self) -> &[u32] {
@@ -221,7 +260,7 @@ impl SampleEvidence {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SampleLikelihood {
     ploidy: Ploidy,
-    phred_likelihoods: Option<Box<[u32]>>,
+    phred_likelihoods: Option<SmallVec<[u32; 15]>>,
     evidence: SampleEvidence,
 }
 
@@ -239,17 +278,39 @@ impl SampleLikelihood {
         }
         Ok(Self {
             ploidy,
-            phred_likelihoods,
+            phred_likelihoods: phred_likelihoods.map(|values| values.into_vec().into()),
             evidence,
         })
     }
 
     pub fn observed(
         ploidy: Ploidy,
-        phred_likelihoods: impl Into<Box<[u32]>>,
+        phred_likelihoods: impl IntoIterator<Item = u32>,
         evidence: SampleEvidence,
     ) -> Result<Self> {
-        Self::new(ploidy, Some(phred_likelihoods.into()), evidence)
+        let phred_likelihoods = phred_likelihoods.into_iter().collect::<SmallVec<_>>();
+        if genotype_count(evidence.allele_depths.len(), ploidy.get())
+            .is_none_or(|count| count != phred_likelihoods.len())
+        {
+            return Err(CallError::InvalidLikelihoodDimensions);
+        }
+        Ok(Self {
+            ploidy,
+            phred_likelihoods: Some(phred_likelihoods),
+            evidence,
+        })
+    }
+
+    pub(crate) fn observed_generated(
+        ploidy: Ploidy,
+        phred_likelihoods: SmallVec<[u32; 15]>,
+        evidence: SampleEvidence,
+    ) -> Self {
+        Self {
+            ploidy,
+            phred_likelihoods: Some(phred_likelihoods),
+            evidence,
+        }
     }
 
     pub fn missing(allele_count: usize, ploidy: Ploidy) -> Result<Self> {
@@ -482,9 +543,9 @@ pub struct LikelihoodSite {
     reference_sequence_id: usize,
     position: u64,
     reference: Allele,
-    alternates: Box<[Allele]>,
-    allele_quality_sums: Box<[f32]>,
-    samples: Box<[SampleLikelihood]>,
+    alternates: SmallVec<[Allele; 4]>,
+    allele_quality_sums: SmallVec<[f32; 5]>,
+    samples: SmallVec<[SampleLikelihood; 1]>,
     indel_summary: Option<IndelSummary>,
     annotations: Option<SiteAnnotations>,
     prior_allele_counts: Option<PriorAlleleCounts>,
@@ -495,11 +556,11 @@ impl LikelihoodSite {
         reference_sequence_id: usize,
         position: u64,
         reference: Allele,
-        alternates: impl Into<Box<[Allele]>>,
-        allele_quality_sums: impl Into<Box<[f32]>>,
-        samples: impl Into<Box<[SampleLikelihood]>>,
+        alternates: impl IntoIterator<Item = Allele>,
+        allele_quality_sums: impl IntoIterator<Item = f32>,
+        samples: impl IntoIterator<Item = SampleLikelihood>,
     ) -> Result<Self> {
-        let alternates = alternates.into();
+        let alternates = alternates.into_iter().collect::<SmallVec<[Allele; 4]>>();
         if alternates.is_empty()
             || alternates.iter().any(|allele| allele == &reference)
             || alternates
@@ -510,7 +571,9 @@ impl LikelihoodSite {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
         let allele_count = alternates.len() + 1;
-        let allele_quality_sums = allele_quality_sums.into();
+        let allele_quality_sums = allele_quality_sums
+            .into_iter()
+            .collect::<SmallVec<[f32; 5]>>();
         if allele_quality_sums.len() != allele_count
             || allele_quality_sums
                 .iter()
@@ -518,7 +581,9 @@ impl LikelihoodSite {
         {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
-        let samples = samples.into();
+        let samples = samples
+            .into_iter()
+            .collect::<SmallVec<[SampleLikelihood; 1]>>();
         if samples.iter().any(|sample| {
             sample.evidence().allele_depths().len() != allele_count
                 || sample.phred_likelihoods().is_some_and(|likelihoods| {
@@ -528,7 +593,25 @@ impl LikelihoodSite {
         }) {
             return Err(CallError::InvalidLikelihoodDimensions);
         }
-        Ok(Self {
+        Ok(Self::from_generated(
+            reference_sequence_id,
+            position,
+            reference,
+            alternates,
+            allele_quality_sums,
+            samples,
+        ))
+    }
+
+    pub(crate) fn from_generated(
+        reference_sequence_id: usize,
+        position: u64,
+        reference: Allele,
+        alternates: SmallVec<[Allele; 4]>,
+        allele_quality_sums: SmallVec<[f32; 5]>,
+        samples: SmallVec<[SampleLikelihood; 1]>,
+    ) -> Self {
+        Self {
             reference_sequence_id,
             position,
             reference,
@@ -538,7 +621,7 @@ impl LikelihoodSite {
             indel_summary: None,
             annotations: None,
             prior_allele_counts: None,
-        })
+        }
     }
 
     pub fn with_indel_summary(mut self, summary: IndelSummary) -> Self {

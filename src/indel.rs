@@ -420,21 +420,25 @@ impl IndelSiteBuilder {
                 let mapping_quality = raw_mapping_quality.min(self.config.mapping_quality_cap);
                 quality = quality.min(mapping_quality).clamp(4, 63);
                 allele_depths[allele] += 1;
-                if read.record.flags() & REVERSE == 0 {
-                    forward_depths[allele] += 1;
-                } else {
+                let reverse = read.record.flags() & REVERSE != 0;
+                if reverse {
                     reverse_depths[allele] += 1;
+                } else {
+                    forward_depths[allele] += 1;
                 }
                 quality_sums[allele] += u64::from(quality);
+                let qpos = read.projection.qpos;
                 let observation = AnnotationObservation {
                     allele,
                     is_reference: allele == 0,
+                    reverse,
                     base_quality: original_sequence_quality,
                     raw_mapping_quality,
                     mapping_quality,
                     effective_quality: quality,
+                    tail_distance: qpos.min(read.record.sequence_len() - 1 - qpos).min(25) as u8,
                 };
-                annotations.observe(read.record, read.projection, observation);
+                annotations.observe(observation);
                 annotations.observe_detailed(
                     read.record,
                     read.projection,
@@ -444,7 +448,7 @@ impl IndelSiteBuilder {
                 self.observations.push(BaseObservation::new(
                     allele_nucleotide(allele),
                     quality,
-                    read.record.flags() & REVERSE != 0,
+                    reverse,
                 ));
             }
             compensate_ambiguous_depths(

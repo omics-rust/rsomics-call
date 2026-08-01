@@ -1,5 +1,6 @@
 use rsomics_bamio::raw::RawRecord;
 use rsomics_pileup::Column;
+use smallvec::SmallVec;
 
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, LikelihoodMatrix, LikelihoodSite, Nucleotide,
@@ -182,11 +183,11 @@ impl SnpAccumulator {
             self.allele_depths[base as usize] += 1;
             self.quality_sums[base as usize] += u64::from(observation.effective_quality);
         }
-        self.annotations.observe(record, projection, observation);
+        self.annotations.observe(observation);
         self.observations.push(BaseObservation::new(
             base,
             observation.effective_quality,
-            record.flags() & 0x10 != 0,
+            observation.reverse,
         ));
     }
 
@@ -236,6 +237,7 @@ fn accepted_observation(
 ) -> Option<(Nucleotide, AnnotationObservation)> {
     let qualities = record.quality_scores();
     let qpos = projection.qpos;
+    let sequence_len = record.sequence_len();
     let quality = |index| {
         if qualities.is_empty() {
             u8::MAX
@@ -248,7 +250,7 @@ fn accepted_observation(
         base_quality = base_quality
             .min(u16::from(quality(qpos - 1)) + u16::from(config.neighboring_quality_delta));
     }
-    if qpos + 1 < record.sequence_len() {
+    if qpos + 1 < sequence_len {
         base_quality = base_quality
             .min(u16::from(quality(qpos + 1)) + u16::from(config.neighboring_quality_delta));
     }
@@ -263,6 +265,7 @@ fn accepted_observation(
     };
     let mapping_quality = raw_mapping_quality.min(config.mapping_quality_cap);
     let effective_quality = base_quality.min(mapping_quality).clamp(4, 63);
+    let reverse = record.flags() & 0x10 != 0;
     let nibble = record.seq_nibble(qpos);
     let base = if nibble == 0 {
         reference_base
@@ -274,10 +277,12 @@ fn accepted_observation(
         AnnotationObservation {
             allele: base as usize,
             is_reference: base == reference_base,
+            reverse,
             base_quality,
             raw_mapping_quality,
             mapping_quality,
             effective_quality,
+            tail_distance: qpos.min(sequence_len - 1 - qpos).min(25) as u8,
         },
     ))
 }
@@ -287,6 +292,7 @@ pub struct SnpSiteBuilder {
     model: ErrorModel,
     samples: Vec<SnpAccumulator>,
     entry_samples: Vec<Option<usize>>,
+    evidence: Vec<SnpEvidence>,
 }
 
 impl SnpSiteBuilder {
@@ -301,6 +307,7 @@ impl SnpSiteBuilder {
                 .take(sample_count)
                 .collect(),
             entry_samples: Vec::new(),
+            evidence: Vec::with_capacity(sample_count),
         })
     }
 
@@ -354,12 +361,12 @@ impl SnpSiteBuilder {
         }
 
         let model = &mut self.model;
-        let evidence = self
-            .samples
-            .iter_mut()
-            .map(|sample| sample.finish(model))
-            .collect::<Result<Vec<_>>>()?;
-        let alleles = selected_alleles(reference_base, &evidence)?;
+        self.evidence.clear();
+        for sample in &mut self.samples {
+            self.evidence.push(sample.finish(model)?);
+        }
+        let evidence = &self.evidence;
+        let alleles = selected_alleles(reference_base, evidence)?;
         let allele_count = alleles.len();
         let has_alternate = alleles
             .iter()
@@ -368,13 +375,13 @@ impl SnpSiteBuilder {
         let selected_indices = alleles
             .iter()
             .map(|allele| allele.matrix_base as usize)
-            .collect::<Vec<_>>();
+            .collect::<SmallVec<[usize; 5]>>();
         let diploid = Ploidy::new(2).unwrap();
         let samples = evidence
             .iter()
             .map(|sample| {
                 let matrix = sample.likelihoods();
-                let mut raw = Vec::with_capacity(allele_count * (allele_count + 1) / 2);
+                let mut raw = SmallVec::<[f32; 15]>::new();
                 for second in 0..allele_count {
                     for first in 0..=second {
                         raw.push(
@@ -386,23 +393,30 @@ impl SnpSiteBuilder {
                 let phred_likelihoods = raw
                     .into_iter()
                     .map(|value| ((f64::from(value - minimum) + 0.499) as u32).min(255))
-                    .collect::<Vec<_>>();
+                    .collect::<SmallVec<[u32; 15]>>();
                 let allele_depths = alleles
                     .iter()
                     .map(|allele| sample.allele_depths()[allele.matrix_base as usize])
-                    .collect::<Vec<_>>();
+                    .collect::<SmallVec<[u32; 5]>>();
                 let allele_quality_sums = alleles
                     .iter()
                     .map(|allele| sample.quality_sums()[allele.matrix_base as usize])
-                    .collect::<Vec<_>>();
-                let evidence =
-                    SampleEvidence::new(sample.depth(), allele_depths, allele_quality_sums)?
-                        .with_annotations(
-                            sample.annotations.sample_annotations(&selected_indices)?,
-                        )?;
-                SampleLikelihood::observed(diploid, phred_likelihoods, evidence)
+                    .collect::<SmallVec<[u32; 5]>>();
+                let evidence = SampleEvidence::from_generated(
+                    sample.depth(),
+                    allele_depths,
+                    allele_quality_sums,
+                )
+                .with_generated_annotations(
+                    sample.annotations.sample_annotations(&selected_indices)?,
+                );
+                Ok(SampleLikelihood::observed_generated(
+                    diploid,
+                    phred_likelihoods,
+                    evidence,
+                ))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<SmallVec<[SampleLikelihood; 1]>>>()?;
         let reference_sequence_id = usize::try_from(column.reference_id())
             .map_err(|_| CallError::InvalidPileupCoordinate)?;
         let position =
@@ -411,8 +425,8 @@ impl SnpSiteBuilder {
         let reference = alleles.next().unwrap();
         let reference_quality_sum = reference.quality_sum;
         let reference = reference.allele;
-        let mut alternates = Vec::new();
-        let mut allele_quality_sums = vec![reference_quality_sum];
+        let mut alternates = SmallVec::<[Allele; 4]>::new();
+        let mut allele_quality_sums = SmallVec::<[f32; 5]>::from_slice(&[reference_quality_sum]);
         for allele in alleles {
             alternates.push(allele.allele);
             allele_quality_sums.push(allele.quality_sum);
@@ -422,14 +436,14 @@ impl SnpSiteBuilder {
             false,
             has_alternate,
         )?;
-        Ok(LikelihoodSite::new(
+        Ok(LikelihoodSite::from_generated(
             reference_sequence_id,
             position,
             reference,
             alternates,
             allele_quality_sums,
             samples,
-        )?
+        )
         .with_annotations(annotations))
     }
 }
@@ -440,7 +454,10 @@ struct SelectedAllele {
     quality_sum: f32,
 }
 
-fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Vec<SelectedAllele>> {
+fn selected_alleles(
+    reference: Nucleotide,
+    samples: &[SnpEvidence],
+) -> Result<SmallVec<[SelectedAllele; 5]>> {
     let mut quality_sums = [0.0f32; 4];
     for sample in samples {
         let total = sample.quality_sums()[..4]
@@ -468,11 +485,12 @@ fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Ve
         Nucleotide::N => 0.0,
         _ => quality_sums[reference_index],
     };
-    let mut selected = vec![SelectedAllele {
+    let mut selected = SmallVec::<[SelectedAllele; 5]>::new();
+    selected.push(SelectedAllele {
         allele: Allele::new([nucleotide_byte(reference)])?,
         matrix_base: reference,
         quality_sum: reference_quality_sum,
-    }];
+    });
     let mut unseen = None;
     for &index in order.iter().rev() {
         if index == reference_index {
