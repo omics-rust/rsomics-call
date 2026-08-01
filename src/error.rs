@@ -105,6 +105,9 @@ pub enum CallError {
     #[error("reference input {path}: {message}")]
     ReferenceInput { path: String, message: String },
 
+    #[error("a FASTA reference is required for {0}")]
+    MissingLikelihoodReference(&'static str),
+
     #[error(transparent)]
     Pileup(#[from] rsomics_pileup::PileupError),
 

@@ -398,10 +398,14 @@ fn selected_alleles(reference: Nucleotide, samples: &[SnpEvidence]) -> Result<Ve
     }
 
     let reference_index = reference as usize;
+    let reference_quality_sum = match reference {
+        Nucleotide::N => 0.0,
+        _ => quality_sums[reference_index],
+    };
     let mut selected = vec![SelectedAllele {
         allele: Allele::new([nucleotide_byte(reference)])?,
         matrix_base: reference,
-        quality_sum: quality_sums[reference_index],
+        quality_sum: reference_quality_sum,
     }];
     let mut unseen = None;
     for &index in order.iter().rev() {

@@ -1058,6 +1058,7 @@ fn rsomics_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
     )
     .unwrap()
     .with_partial_baq(500, false)
+    .unwrap()
     .with_indels(IndelLikelihoodConfig::default())
     .unwrap();
     let mut indel = None;
@@ -1115,6 +1116,44 @@ fn complete_snp_annotations_match_bcftools_1_24() {
     let run = SnpLikelihoodRun::open(
         [AlignmentInput::new(0, &alignment, "annotations")],
         &reference,
+        SampleSelection::default(),
+        PileupOptions::default(),
+        SnpLikelihoodConfig::default(),
+    )
+    .unwrap();
+    let mut actual = Vec::new();
+    run.run(|site| {
+        actual.push(site);
+        Ok(())
+    })
+    .unwrap();
+    assert_sites_match(&actual, &expected);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn reference_free_likelihoods_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let first = write_alignment(directory.path(), "first", "S1", 1, "1M", "A");
+    let second = write_alignment(directory.path(), "second", "S2", 1, "1M", "G");
+    let expected = Command::new(bcftools())
+        .args(["mpileup", "--no-reference", "-a", ANNOTATIONS, "-Ou"])
+        .args([&first, &second])
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    let expected = decode_likelihoods(&expected.stdout);
+
+    let run = SnpLikelihoodRun::open_without_reference(
+        [
+            AlignmentInput::new(1, &first, "first"),
+            AlignmentInput::new(2, &second, "second"),
+        ],
         SampleSelection::default(),
         PileupOptions::default(),
         SnpLikelihoodConfig::default(),

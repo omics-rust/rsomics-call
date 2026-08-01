@@ -15,7 +15,9 @@ rsomics-call run
 The current code establishes coordinate-merged SAM/BAM/CRAM input, multi-input
 sample projection, bounded reference caching, and streaming SNP likelihoods
 with per-input depth limits, deterministic deep-sample selection, and
-allele-aligned site and sample quality evidence. Indexed region input merges
+allele-aligned site and sample quality evidence. An explicit reference-free
+mode emits `N` reference alleles and rejects BAQ and indel configuration at the
+builder boundary. Indexed region input merges
 records across samples by coordinate, sorts selections by alignment-header
 order, merges overlapping or adjacent intervals, and emits each selected site
 once. Streaming inclusion targets require no alignment index, normalize

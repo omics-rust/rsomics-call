@@ -20,7 +20,7 @@ pub struct SnpLikelihoodRun {
     alignments: AlignmentRun,
     reference_lengths: Box<[u64]>,
     pileup_options: PileupOptions,
-    reference: ReferenceCache,
+    reference: Option<ReferenceCache>,
     pileup: PileupEngine,
     sites: SnpSiteBuilder,
     indels: Option<IndelSiteBuilder>,
@@ -76,7 +76,22 @@ impl SnpLikelihoodRun {
         let reference = reference.as_ref();
         let alignments =
             AlignmentRun::Sequential(AlignmentSet::open(inputs, Some(reference), selection)?);
-        Self::from_alignments(alignments, reference, pileup_options, likelihood_config)
+        Self::from_alignments(
+            alignments,
+            Some(reference),
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    pub fn open_without_reference(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        selection: SampleSelection,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        let alignments = AlignmentRun::Sequential(AlignmentSet::open(inputs, None, selection)?);
+        Self::from_alignments(alignments, None, pileup_options, likelihood_config)
     }
 
     pub fn open_region(
@@ -110,7 +125,40 @@ impl SnpLikelihoodRun {
         let regions = normalize_regions(set.reference_sequences(), regions)?;
         Self::from_alignments(
             AlignmentRun::Region { set, regions },
-            reference,
+            Some(reference),
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    pub fn open_region_without_reference(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        selection: SampleSelection,
+        region: Region,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        Self::open_regions_without_reference(
+            inputs,
+            selection,
+            [region],
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    pub fn open_regions_without_reference(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        selection: SampleSelection,
+        regions: impl IntoIterator<Item = Region>,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        let set = IndexedAlignmentSet::open(inputs, None, selection)?;
+        let regions = normalize_regions(set.reference_sequences(), regions)?;
+        Self::from_alignments(
+            AlignmentRun::Region { set, regions },
+            None,
             pileup_options,
             likelihood_config,
         )
@@ -118,7 +166,7 @@ impl SnpLikelihoodRun {
 
     fn from_alignments(
         alignments: AlignmentRun,
-        reference: &Path,
+        reference: Option<&Path>,
         pileup_options: PileupOptions,
         likelihood_config: SnpLikelihoodConfig,
     ) -> Result<Self> {
@@ -129,7 +177,9 @@ impl SnpLikelihoodRun {
             .collect::<Box<[_]>>();
         let pileup = PileupEngine::new(reference_lengths.iter().copied(), pileup_options);
         let sites = SnpSiteBuilder::new(alignments.samples().samples().len(), likelihood_config)?;
-        let reference = ReferenceCache::open(reference, alignments.reference_sequences())?;
+        let reference = reference
+            .map(|path| ReferenceCache::open(path, alignments.reference_sequences()))
+            .transpose()?;
         Ok(Self {
             alignments,
             reference_lengths,
@@ -151,17 +201,20 @@ impl SnpLikelihoodRun {
         self.alignments.samples()
     }
 
-    pub fn with_full_baq(mut self, maximum_read_len: usize, redo: bool) -> Self {
-        self.set_baq(BaqMode::Full, maximum_read_len, redo);
-        self
+    pub fn with_full_baq(mut self, maximum_read_len: usize, redo: bool) -> Result<Self> {
+        self.set_baq(BaqMode::Full, maximum_read_len, redo)?;
+        Ok(self)
     }
 
-    pub fn with_partial_baq(mut self, maximum_read_len: usize, redo: bool) -> Self {
-        self.set_baq(BaqMode::Partial, maximum_read_len, redo);
-        self
+    pub fn with_partial_baq(mut self, maximum_read_len: usize, redo: bool) -> Result<Self> {
+        self.set_baq(BaqMode::Partial, maximum_read_len, redo)?;
+        Ok(self)
     }
 
     pub fn with_indels(mut self, config: IndelLikelihoodConfig) -> Result<Self> {
+        if self.reference.is_none() {
+            return Err(CallError::MissingLikelihoodReference("indel likelihoods"));
+        }
         self.indels = Some(IndelSiteBuilder::new(
             self.alignments.samples().samples().len(),
             config,
@@ -181,7 +234,10 @@ impl SnpLikelihoodRun {
         Ok(self.with_targets(crate::region_file::read_targets(path.as_ref())?))
     }
 
-    fn set_baq(&mut self, mode: BaqMode, maximum_read_len: usize, redo: bool) {
+    fn set_baq(&mut self, mode: BaqMode, maximum_read_len: usize, redo: bool) -> Result<()> {
+        if self.reference.is_none() {
+            return Err(CallError::MissingLikelihoodReference("BAQ"));
+        }
         self.baq = Some(BaqRun {
             mode,
             maximum_read_len,
@@ -191,13 +247,14 @@ impl SnpLikelihoodRun {
                 redo,
             },
         });
+        Ok(())
     }
 
     pub fn run(mut self, mut emit: impl FnMut(LikelihoodSite) -> Result<()>) -> Result<()> {
         let targets = self.targets.as_ref();
         let mut pipeline = LikelihoodPipeline {
             pileup: &mut self.pileup,
-            reference: &mut self.reference,
+            reference: self.reference.as_mut(),
             sites: &mut self.sites,
             indels: &mut self.indels,
             baq: self.baq,
@@ -245,7 +302,7 @@ impl SnpLikelihoodRun {
 
 struct LikelihoodPipeline<'a> {
     pileup: &'a mut PileupEngine,
-    reference: &'a mut ReferenceCache,
+    reference: Option<&'a mut ReferenceCache>,
     sites: &'a mut SnpSiteBuilder,
     indels: &'a mut Option<IndelSiteBuilder>,
     baq: Option<BaqRun>,
@@ -280,8 +337,12 @@ fn drain_sites(
             }
         }
         if let Some(baq) = pipeline.baq {
+            let reference = pipeline
+                .reference
+                .as_deref_mut()
+                .ok_or(CallError::MissingLikelihoodReference("BAQ"))?;
             let mut fetch_reference = |reference_id, range, buffer: &mut Vec<u8>| {
-                buffer.extend_from_slice(pipeline.reference.sequence(reference_id, range)?);
+                buffer.extend_from_slice(reference.sequence(reference_id, range)?);
                 Ok::<_, CallError>(())
             };
             match baq.mode {
@@ -298,9 +359,10 @@ fn drain_sites(
             }
         }
         let column = context.column();
-        let reference_base = pipeline
-            .reference
-            .base(column.reference_id(), column.position())?;
+        let reference_base = match pipeline.reference.as_deref_mut() {
+            Some(reference) => reference.base(column.reference_id(), column.position())?,
+            None => Nucleotide::N,
+        };
         let site = pipeline
             .sites
             .build(&column, reference_base, |source_id, record| {
@@ -308,10 +370,13 @@ fn drain_sites(
             })?;
         emit(site)?;
         if let Some(indels) = pipeline.indels {
-            let reference_length = pipeline.reference.length(column.reference_id())?;
+            let reference = pipeline
+                .reference
+                .as_deref_mut()
+                .ok_or(CallError::MissingLikelihoodReference("indel likelihoods"))?;
+            let reference_length = reference.length(column.reference_id())?;
             let mut fetch_reference = |range, buffer: &mut Vec<u8>| {
-                buffer
-                    .extend_from_slice(pipeline.reference.sequence(column.reference_id(), range)?);
+                buffer.extend_from_slice(reference.sequence(column.reference_id(), range)?);
                 Ok::<_, CallError>(())
             };
             if let Some(site) = indels.build(
@@ -874,6 +939,69 @@ mod tests {
     }
 
     #[test]
+    fn reference_free_likelihoods_use_n_and_reject_reference_features() {
+        let first = sam_file("S1", 'A');
+        let second = sam_file("S2", 'G');
+        let open = || {
+            SnpLikelihoodRun::open_without_reference(
+                [
+                    AlignmentInput::new(1, first.path(), "first"),
+                    AlignmentInput::new(2, second.path(), "second"),
+                ],
+                SampleSelection::default(),
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            open().with_full_baq(500, false),
+            Err(CallError::MissingLikelihoodReference("BAQ"))
+        ));
+        assert!(matches!(
+            open().with_indels(IndelLikelihoodConfig::default()),
+            Err(CallError::MissingLikelihoodReference("indel likelihoods"))
+        ));
+
+        let mut sites = Vec::new();
+        open()
+            .run(|site| {
+                sites.push(site);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].reference().as_bytes(), b"N");
+        assert_eq!(
+            sites[0]
+                .alternates()
+                .iter()
+                .map(Allele::as_bytes)
+                .collect::<Vec<_>>(),
+            [b"G".as_slice(), b"A".as_slice(), b"<*>".as_slice()]
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let input = indexed_bam_file(directory.path(), "indexed", "S1", 1, "1M", "A");
+        let mut indexed = Vec::new();
+        SnpLikelihoodRun::open_region_without_reference(
+            [AlignmentInput::new(1, input, "indexed")],
+            SampleSelection::default(),
+            "chr1:1-1".parse().unwrap(),
+            PileupOptions::default(),
+            SnpLikelihoodConfig::default(),
+        )
+        .unwrap()
+        .run(|site| {
+            indexed.push(site);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].reference().as_bytes(), b"N");
+    }
+
+    #[test]
     fn fused_call_matches_materialized_typed_pipeline() {
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
         let reference = fixtures.join("alignment-reference.fa");
@@ -974,7 +1102,8 @@ mod tests {
             SnpLikelihoodConfig::default(),
         )
         .unwrap()
-        .with_full_baq(500, false);
+        .with_full_baq(500, false)
+        .unwrap();
         let mut sites = Vec::new();
         run.run(|site| {
             sites.push(site);
@@ -1024,7 +1153,8 @@ mod tests {
             SnpLikelihoodConfig::default(),
         )
         .unwrap()
-        .with_full_baq(500, false);
+        .with_full_baq(500, false)
+        .unwrap();
         let mut sites = Vec::new();
         run.run(|site| {
             sites.push(site);
@@ -1075,7 +1205,8 @@ mod tests {
             SnpLikelihoodConfig::default(),
         )
         .unwrap()
-        .with_partial_baq(500, false);
+        .with_partial_baq(500, false)
+        .unwrap();
         let mut sites = Vec::new();
         run.run(|site| {
             sites.push(site);
@@ -1113,6 +1244,7 @@ mod tests {
         )
         .unwrap()
         .with_partial_baq(500, false)
+        .unwrap()
         .with_indels(IndelLikelihoodConfig::default())
         .unwrap();
         let mut sites = Vec::new();
@@ -1155,6 +1287,7 @@ mod tests {
         )
         .unwrap()
         .with_partial_baq(500, false)
+        .unwrap()
         .with_indels(IndelLikelihoodConfig::default())
         .unwrap();
         let mut sites = Vec::new();
@@ -1197,6 +1330,7 @@ mod tests {
         )
         .unwrap()
         .with_partial_baq(500, false)
+        .unwrap()
         .with_indels(IndelLikelihoodConfig::default())
         .unwrap();
         let mut sites = Vec::new();
