@@ -7,7 +7,7 @@ use crate::{
     CallError, CallPloidy, CalledSite, CalledVariantWriter, CalledVcfSchema, ConsensusCaller,
     ConsensusCallerConfig, GvcfBlocker, IndexedLikelihoodVariantReader, LikelihoodSite,
     LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, MultiallelicCallerConfig,
-    PloidyResolver, Result, VariantOutputFormat,
+    PloidyResolver, Result, VariantOutputFormat, caller::validate_sample_groups,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +65,7 @@ pub struct LikelihoodCallRun {
     ploidy: PloidyResolver,
     gvcf: Option<GvcfBlocker>,
     output: CallOutputOptions,
+    sample_groups: Option<Box<[usize]>>,
 }
 
 enum SiteCaller {
@@ -85,6 +86,7 @@ impl LikelihoodCallRun {
             ploidy,
             gvcf: None,
             output: CallOutputOptions::default(),
+            sample_groups: None,
         }
     }
 
@@ -99,6 +101,19 @@ impl LikelihoodCallRun {
     pub fn with_output_options(mut self, options: CallOutputOptions) -> Self {
         self.output = options;
         self
+    }
+
+    pub fn with_sample_groups(mut self, groups: impl IntoIterator<Item = usize>) -> Result<Self> {
+        if matches!(&self.caller, SiteCaller::Consensus(_)) {
+            return Err(CallError::UnsupportedCallerGroups);
+        }
+        let groups = groups.into_iter().collect::<Box<[_]>>();
+        if groups.len() != self.ploidy.sample_count() {
+            return Err(CallError::CallerGroupCountMismatch);
+        }
+        validate_sample_groups(&groups)?;
+        self.sample_groups = Some(groups);
+        Ok(self)
     }
 
     pub fn run<R, W>(
@@ -181,6 +196,7 @@ impl LikelihoodCallRun {
             ploidy: self.ploidy,
             gvcf: self.gvcf,
             output: self.output,
+            sample_groups: self.sample_groups,
             writer: CalledVariantWriter::new(output, schema, format)?,
             reference_names: input_schema
                 .header()
@@ -201,6 +217,7 @@ where
     ploidy: PloidyResolver,
     gvcf: Option<GvcfBlocker>,
     output: CallOutputOptions,
+    sample_groups: Option<Box<[usize]>>,
     writer: CalledVariantWriter<W>,
     reference_names: Box<[Box<str>]>,
     ploidies: Vec<CallPloidy>,
@@ -220,7 +237,12 @@ where
             .map_err(|error| call_record_error(record, error))?;
         let called = self
             .caller
-            .call(site, &self.ploidies, self.ploidy.prior_chromosome_count())
+            .call(
+                site,
+                &self.ploidies,
+                self.ploidy.prior_chromosome_count(),
+                self.sample_groups.as_deref(),
+            )
             .map_err(|error| call_record_error(record, error))?;
         if !self.output.accepts(site, &called) {
             return Ok(());
@@ -246,11 +268,15 @@ impl SiteCaller {
         site: &LikelihoodSite,
         ploidies: &[CallPloidy],
         prior_chromosome_count: usize,
+        sample_groups: Option<&[usize]>,
     ) -> Result<CalledSite> {
         match self {
-            Self::Multiallelic(caller) => {
-                caller.call_with_ploidies(site, ploidies, prior_chromosome_count)
-            }
+            Self::Multiallelic(caller) => match sample_groups {
+                Some(groups) => {
+                    caller.call_with_groups(site, ploidies, prior_chromosome_count, groups)
+                }
+                None => caller.call_with_ploidies(site, ploidies, prior_chromosome_count),
+            },
             Self::Consensus(caller) => caller.call_with_ploidies(site, ploidies),
         }
     }

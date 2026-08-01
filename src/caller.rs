@@ -295,15 +295,7 @@ fn caller_groups(
             selection,
         }]);
     };
-    let maximum_group = sample_groups
-        .iter()
-        .copied()
-        .max()
-        .ok_or(CallError::InvalidCallerGroups)?;
-    if maximum_group >= sample_groups.len() {
-        return Err(CallError::InvalidCallerGroups);
-    }
-    let group_count = maximum_group + 1;
+    let group_count = validate_sample_groups(sample_groups)?;
     let allele_count = site.alternates().len() + 1;
     let mut members = vec![Vec::new(); group_count];
     let mut quality_sums = vec![vec![0.0f32; allele_count]; group_count];
@@ -316,9 +308,6 @@ fn caller_groups(
                 *sum += value as f32 / total;
             }
         }
-    }
-    if members.iter().any(Vec::is_empty) {
-        return Err(CallError::InvalidCallerGroups);
     }
     Ok(quality_sums
         .into_iter()
@@ -344,6 +333,26 @@ fn caller_groups(
             }
         })
         .collect())
+}
+
+pub(crate) fn validate_sample_groups(sample_groups: &[usize]) -> Result<usize> {
+    let maximum_group = sample_groups
+        .iter()
+        .copied()
+        .max()
+        .ok_or(CallError::InvalidCallerGroups)?;
+    if maximum_group >= sample_groups.len() {
+        return Err(CallError::InvalidCallerGroups);
+    }
+    let group_count = maximum_group + 1;
+    let mut seen = vec![false; group_count];
+    for &group in sample_groups {
+        seen[group] = true;
+    }
+    if seen.contains(&false) {
+        return Err(CallError::InvalidCallerGroups);
+    }
+    Ok(group_count)
 }
 
 fn select_alleles(

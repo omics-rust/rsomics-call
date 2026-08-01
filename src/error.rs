@@ -159,6 +159,9 @@ pub enum CallError {
     #[error("caller group indices must be contiguous and nonempty")]
     InvalidCallerGroups,
 
+    #[error("sample groups require the multiallelic calling model")]
+    UnsupportedCallerGroups,
+
     #[error("the prior chromosome count is outside the cohort ploidy range")]
     InvalidPriorChromosomeCount,
 

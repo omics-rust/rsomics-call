@@ -716,6 +716,59 @@ fn call_site_output_policy_matches_bcftools_1_24() {
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn grouped_call_workflow_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("grouped-call.vcf");
+    let groups = directory.path().join("groups.txt");
+    fs::write(
+        &input,
+        "##fileformat=VCFv4.2\n\
+         ##contig=<ID=chr1,length=10>\n\
+         ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+         ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Likelihoods\">\n\
+         ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+         ##FORMAT=<ID=QS,Number=R,Type=Integer,Description=\"Allele quality sums\">\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tfirst\tsecond\n\
+         chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP:QS\t0,3,40,3,40,40:1:40,0,0\t40,3,0,40,3,40:1:0,40,0\n",
+    )
+    .unwrap();
+    fs::write(&groups, "first\tpopulation-a\nsecond\tpopulation-b\n").unwrap();
+
+    let expected = Command::new(bcftools())
+        .args(["call", "-m", "-a", "GP,GQ", "-G"])
+        .arg(&groups)
+        .args(["--group-samples-tag", "QS", "-Ov"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+
+    let data = fs::read(&input).unwrap();
+    let reader = LikelihoodVariantReader::new(&data[..]).unwrap();
+    let resolver = PloidyDefinition::preset(PloidyPreset::Diploid)
+        .default_resolver(2)
+        .unwrap();
+    let actual = LikelihoodCallRun::new(
+        CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+        resolver,
+    )
+    .with_sample_groups([0, 1])
+    .unwrap()
+    .run(reader, Vec::new(), rsomics_call::VariantOutputFormat::Vcf)
+    .unwrap();
+    assert_eq!(
+        sample_call_signature(&actual),
+        sample_call_signature(&expected.stdout)
+    );
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn grch37_ploidy_preset_matches_bcftools_1_24() {
     assert_bcftools_1_24();
     let directory = tempfile::tempdir().unwrap();

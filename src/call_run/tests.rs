@@ -39,6 +39,15 @@ chr1\t2\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n\
 chr1\t3\t.\tN\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n\
 chr1\t4\t.\tA\tAT,<*>\t.\t.\tINDEL;IDV=2;IMF=1;QS=1,1,0\tPL:DP\t40,3,0,40,3,40:10\n";
 
+const GROUP_INPUT: &[u8] = b"##fileformat=VCFv4.2\n\
+##contig=<ID=chr1,length=10>\n\
+##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Likelihoods\">\n\
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">\n\
+##FORMAT=<ID=QS,Number=R,Type=Integer,Description=\"Allele quality sums\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tfirst\tsecond\n\
+chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0\tPL:DP:QS\t0,3,40,3,40,40:1:40,0,0\t40,3,0,40,3,40:1:0,40,0\n";
+
 #[test]
 fn composes_ploidy_calling_gvcf_and_output() {
     let reader = LikelihoodVariantReader::new(INPUT).unwrap();
@@ -164,6 +173,62 @@ fn applies_call_site_output_policy() {
         positions(CallOutputOptions::default().with_keep_masked_reference(true)),
         [1, 2, 3, 4]
     );
+}
+
+#[test]
+fn applies_validated_multiallelic_sample_groups() {
+    let resolver = || {
+        PloidyDefinition::preset(PloidyPreset::Diploid)
+            .default_resolver(2)
+            .unwrap()
+    };
+    let output = LikelihoodCallRun::new(
+        CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+        resolver(),
+    )
+    .with_sample_groups([0, 1])
+    .unwrap()
+    .run(
+        LikelihoodVariantReader::new(GROUP_INPUT).unwrap(),
+        Vec::new(),
+        VariantOutputFormat::Vcf,
+    )
+    .unwrap();
+    let record = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .find(|line| !line.starts_with('#'))
+        .unwrap()
+        .split('\t')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(record[9].split(':').next(), Some("0/0"));
+    assert_eq!(record[10].split(':').next(), Some("1/1"));
+
+    assert!(matches!(
+        LikelihoodCallRun::new(
+            CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+            resolver(),
+        )
+        .with_sample_groups([0]),
+        Err(CallError::CallerGroupCountMismatch)
+    ));
+    assert!(matches!(
+        LikelihoodCallRun::new(
+            CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+            resolver(),
+        )
+        .with_sample_groups([0, 2]),
+        Err(CallError::InvalidCallerGroups)
+    ));
+    assert!(matches!(
+        LikelihoodCallRun::new(
+            CallModel::Consensus(ConsensusCallerConfig::default()),
+            resolver(),
+        )
+        .with_sample_groups([0, 1]),
+        Err(CallError::UnsupportedCallerGroups)
+    ));
 }
 
 #[test]
