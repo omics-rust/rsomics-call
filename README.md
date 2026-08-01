@@ -3,8 +3,7 @@
 `rsomics-call` is the alignment-likelihood and lightweight small-variant
 calling product in the rsomics portfolio.
 
-The crate remains unpublished while its release performance gates are being
-completed. Its implemented product surface contains three commands:
+The implemented product surface contains three commands:
 
 ```text
 rsomics-call pileup
@@ -72,9 +71,9 @@ files currently accept exactly one sample name per row; the contradictory
 bcftools 1.24 optional sex and numeric-ploidy behavior is not exposed as a
 command-line promise. Call-stage targets, target complements, and a separate
 unseen-allele switch are likewise absent until their documented and installed
-bcftools 1.24 behaviors can be reconciled. The complete implemented commands
-remain available while these isolated options and the product performance
-gate are unresolved.
+bcftools 1.24 behaviors can be reconciled. Those isolated options remain
+explicitly excluded from the implemented commands. The release benchmark and
+reproduction procedure are recorded in [`PERFORMANCE.md`](PERFORMANCE.md).
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample

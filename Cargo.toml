@@ -7,6 +7,7 @@ rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/omics-rust/rsomics-call"
 homepage = "https://github.com/omics-rust/rsomics-call"
+documentation = "https://docs.rs/rsomics-call"
 authors = ["Zane Leong <efd@live.com>"]
 categories = ["science"]
 keywords = ["bioinformatics", "variant-calling", "genomics", "bam", "vcf"]
