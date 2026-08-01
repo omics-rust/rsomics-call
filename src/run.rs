@@ -14,7 +14,9 @@ use crate::{
     LikelihoodCallRun, LikelihoodSite, LikelihoodVcfSchema, Nucleotide, ReferenceSequence, Result,
     SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder, VariantOutputFormat,
     alignment::IndexedAlignmentSet,
-    selection::{ReferenceRange, RegionSelection, TargetSet, normalize_regions},
+    selection::{
+        ReferenceRange, RegionSelection, TargetSet, normalize_region_file, normalize_regions,
+    },
 };
 
 pub struct SnpLikelihoodRun {
@@ -122,11 +124,32 @@ impl SnpLikelihoodRun {
         likelihood_config: SnpLikelihoodConfig,
     ) -> Result<Self> {
         let reference = reference.as_ref();
-        let set = IndexedAlignmentSet::open(inputs, Some(reference), selection)?;
-        let regions = normalize_regions(set.reference_sequences(), regions)?;
-        Self::from_alignments(
-            AlignmentRun::Region { set, regions },
+        Self::open_regions_inner(
+            inputs,
             Some(reference),
+            selection,
+            regions,
+            false,
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    pub fn open_regions_file(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        reference: impl AsRef<Path>,
+        selection: SampleSelection,
+        regions: impl AsRef<Path>,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        let regions = crate::region_file::read_regions(regions.as_ref())?;
+        Self::open_regions_inner(
+            inputs,
+            Some(reference.as_ref()),
+            selection,
+            regions,
+            true,
             pileup_options,
             likelihood_config,
         )
@@ -155,11 +178,54 @@ impl SnpLikelihoodRun {
         pileup_options: PileupOptions,
         likelihood_config: SnpLikelihoodConfig,
     ) -> Result<Self> {
-        let set = IndexedAlignmentSet::open(inputs, None, selection)?;
-        let regions = normalize_regions(set.reference_sequences(), regions)?;
+        Self::open_regions_inner(
+            inputs,
+            None,
+            selection,
+            regions,
+            false,
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    pub fn open_regions_file_without_reference(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        selection: SampleSelection,
+        regions: impl AsRef<Path>,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        let regions = crate::region_file::read_regions(regions.as_ref())?;
+        Self::open_regions_inner(
+            inputs,
+            None,
+            selection,
+            regions,
+            true,
+            pileup_options,
+            likelihood_config,
+        )
+    }
+
+    fn open_regions_inner(
+        inputs: impl IntoIterator<Item = AlignmentInput>,
+        reference: Option<&Path>,
+        selection: SampleSelection,
+        regions: impl IntoIterator<Item = Region>,
+        file_order: bool,
+        pileup_options: PileupOptions,
+        likelihood_config: SnpLikelihoodConfig,
+    ) -> Result<Self> {
+        let set = IndexedAlignmentSet::open(inputs, reference, selection)?;
+        let regions = if file_order {
+            normalize_region_file(set.reference_sequences(), regions)?
+        } else {
+            normalize_regions(set.reference_sequences(), regions)?
+        };
         Self::from_alignments(
             AlignmentRun::Region { set, regions },
-            None,
+            reference,
             pileup_options,
             likelihood_config,
         )
@@ -821,6 +887,73 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(0, 1), (1, 1)]
         );
+    }
+
+    #[test]
+    fn indexed_region_files_follow_file_reference_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">chr1\nAAAAA\n>chr2\nCCCCC\n").unwrap();
+        fs::write(
+            reference.with_extension("fa.fai"),
+            b"chr1\t5\t6\t5\t6\nchr2\t5\t18\t5\t6\n",
+        )
+        .unwrap();
+        let input = write_indexed_bam(
+            directory.path(),
+            "input",
+            "@HD\tVN:1.6\tSO:coordinate\n\
+             @SQ\tSN:chr1\tLN:5\n\
+             @SQ\tSN:chr2\tLN:5\n\
+             @RG\tID:rg\tSM:S1\n\
+             chr1-read\t0\tchr1\t2\t60\t1M\t*\t0\t0\tA\tI\tRG:Z:rg\n\
+             chr2-read\t0\tchr2\t2\t60\t1M\t*\t0\t0\tC\tI\tRG:Z:rg\n",
+        );
+        let regions = directory.path().join("regions.txt");
+        fs::write(&regions, b"chr2\t2\t2\nchr1\t2\t2\nchr2\t2\t2\n").unwrap();
+        let open = |reference: Option<&Path>| match reference {
+            Some(reference) => SnpLikelihoodRun::open_regions_file(
+                [AlignmentInput::new(1, &input, "input")],
+                reference,
+                SampleSelection::default(),
+                &regions,
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            ),
+            None => SnpLikelihoodRun::open_regions_file_without_reference(
+                [AlignmentInput::new(1, &input, "input")],
+                SampleSelection::default(),
+                &regions,
+                PileupOptions::default(),
+                SnpLikelihoodConfig::default(),
+            ),
+        };
+
+        for (run, expected_reference) in [
+            (open(Some(&reference)).unwrap(), [b'C', b'A']),
+            (open(None).unwrap(), [b'N', b'N']),
+        ] {
+            let mut sites = Vec::new();
+            run.run(|site| {
+                sites.push(site);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.reference_sequence_id())
+                    .collect::<Vec<_>>(),
+                [1, 0]
+            );
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.reference().as_bytes()[0])
+                    .collect::<Vec<_>>(),
+                expected_reference
+            );
+        }
     }
 
     #[test]

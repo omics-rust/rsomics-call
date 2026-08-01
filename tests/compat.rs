@@ -79,13 +79,17 @@ fn write_indexed_alignment(
     reference_length: usize,
     records: &str,
 ) -> PathBuf {
-    let path = directory.join(format!("{name}.bam"));
     let source = format!(
         "@HD\tVN:1.6\tSO:coordinate\n\
          @SQ\tSN:MX\tLN:{reference_length}\n\
          @RG\tID:rg\tSM:{sample}\n\
          {records}"
     );
+    write_indexed_alignment_source(directory, name, &source)
+}
+
+fn write_indexed_alignment_source(directory: &Path, name: &str, source: &str) -> PathBuf {
+    let path = directory.join(format!("{name}.bam"));
     let mut reader = sam::io::Reader::new(source.as_bytes());
     let header = reader.read_header().unwrap();
     let records = reader
@@ -1381,6 +1385,64 @@ fn indexed_regions_and_streaming_targets_match_bcftools_1_24() {
     )
     .unwrap()
     .with_targets(["MX:8-8", "MX:4-4", "MX:7-7"].map(|region| region.parse().unwrap()));
+    let mut actual = Vec::new();
+    run.run(|site| {
+        actual.push(site);
+        Ok(())
+    })
+    .unwrap();
+
+    assert_sites_match(&actual, &expected);
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn indexed_likelihood_region_files_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let reference = directory.path().join("reference.fa");
+    fs::write(&reference, b">chr1\nAAAAA\n>chr2\nCCCCC\n").unwrap();
+    fs::write(
+        reference.with_extension("fa.fai"),
+        b"chr1\t5\t6\t5\t6\nchr2\t5\t18\t5\t6\n",
+    )
+    .unwrap();
+    let input = write_indexed_alignment_source(
+        directory.path(),
+        "input",
+        "@HD\tVN:1.6\tSO:coordinate\n\
+         @SQ\tSN:chr1\tLN:5\n\
+         @SQ\tSN:chr2\tLN:5\n\
+         @RG\tID:rg\tSM:sample\n\
+         chr1-read\t0\tchr1\t2\t60\t1M\t*\t0\t0\tA\tI\tRG:Z:rg\n\
+         chr2-read\t0\tchr2\t2\t60\t1M\t*\t0\t0\tC\tI\tRG:Z:rg\n",
+    );
+    let regions = directory.path().join("regions.txt");
+    fs::write(&regions, b"chr2\t2\t2\nchr1\t2\t2\nchr2\t2\t2\n").unwrap();
+    let output = Command::new(bcftools())
+        .args(["mpileup", "-B", "-f"])
+        .arg(&reference)
+        .args(["-a", ANNOTATIONS, "-R"])
+        .arg(&regions)
+        .arg("-Ou")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = decode_likelihoods(&output.stdout);
+    let run = SnpLikelihoodRun::open_regions_file(
+        [AlignmentInput::new(1, input, "input")],
+        reference,
+        SampleSelection::default(),
+        regions,
+        PileupOptions::default(),
+        SnpLikelihoodConfig::default(),
+    )
+    .unwrap();
     let mut actual = Vec::new();
     run.run(|site| {
         actual.push(site);

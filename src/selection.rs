@@ -75,15 +75,46 @@ pub(crate) fn normalize_regions(
     references: &[ReferenceSequence],
     regions: impl IntoIterator<Item = Region>,
 ) -> Result<Box<[RegionSelection]>> {
-    let mut bounds = regions
+    let mut bounds = resolve_regions(references, regions)?;
+    bounds.sort_unstable_by_key(|region| (region.reference_id, region.start, region.end));
+    build_region_selections(references, bounds)
+}
+
+pub(crate) fn normalize_region_file(
+    references: &[ReferenceSequence],
+    regions: impl IntoIterator<Item = Region>,
+) -> Result<Box<[RegionSelection]>> {
+    let mut bounds = resolve_regions(references, regions)?;
+    let mut ranks = vec![usize::MAX; references.len()];
+    let mut next_rank = 0;
+    for region in &bounds {
+        if ranks[region.reference_id] == usize::MAX {
+            ranks[region.reference_id] = next_rank;
+            next_rank += 1;
+        }
+    }
+    bounds.sort_by_key(|region| (ranks[region.reference_id], region.start, region.end));
+    build_region_selections(references, bounds)
+}
+
+fn resolve_regions(
+    references: &[ReferenceSequence],
+    regions: impl IntoIterator<Item = Region>,
+) -> Result<Vec<ReferenceRange>> {
+    let bounds = regions
         .into_iter()
         .map(|region| resolve_region(references, &region))
         .collect::<Result<Vec<_>>>()?;
     if bounds.is_empty() {
         return Err(CallError::MissingRegions);
     }
-    bounds.sort_unstable_by_key(|region| (region.reference_id, region.start, region.end));
+    Ok(bounds)
+}
 
+fn build_region_selections(
+    references: &[ReferenceSequence],
+    bounds: Vec<ReferenceRange>,
+) -> Result<Box<[RegionSelection]>> {
     let mut merged: Vec<ReferenceRange> = Vec::with_capacity(bounds.len());
     for region in bounds {
         if let Some(previous) = merged.last_mut()
