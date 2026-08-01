@@ -12,6 +12,7 @@ mod format;
 mod glocal;
 mod indel;
 mod model;
+mod ploidy;
 mod run;
 mod samples;
 mod selection;
@@ -32,6 +33,7 @@ pub use model::{
     Allele, IndelSummary, LikelihoodSite, Ploidy, SampleAnnotations, SampleEvidence,
     SampleLikelihood, SiteAnnotations,
 };
+pub use ploidy::{PloidyDefinition, PloidyPreset, PloidyResolver, SamplePloidy};
 pub use run::{SnpLikelihoodRun, run_likelihood_calls};
 pub use samples::{SampleMap, SampleMapBuilder, SampleSelection};
 pub use snp::{SnpEvidence, SnpLikelihoodConfig, SnpSiteBuilder};

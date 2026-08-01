@@ -8,6 +8,22 @@ pub enum CallError {
     #[error("ploidy must be greater than zero")]
     InvalidPloidy,
 
+    #[error("ploidy input {path}: {message}")]
+    PloidyInput { path: String, message: String },
+
+    #[error("ploidy input {path} line {line}: {message}")]
+    PloidyRecord {
+        path: String,
+        line: u64,
+        message: String,
+    },
+
+    #[error("ploidy definition has no sex named {0}")]
+    UnknownPloidySex(String),
+
+    #[error("ploidy sample assignment count does not match the selected samples")]
+    PloidySampleCountMismatch,
+
     #[error("allele and genotype likelihood dimensions are inconsistent")]
     InvalidLikelihoodDimensions,
 

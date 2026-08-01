@@ -32,10 +32,12 @@ allele depths, quality means and sums, strand bias, mismatch, and soft-clip
 annotations at sample and site scope. These paths are checked against bcftools
 and HTSlib 1.24. Called records retain those annotations, replace the internal
 `I16` evidence with model-specific `DP4`, `MQ`, and `PV4`, and preserve
-allele-indexed fields when callers trim alternates. It does not yet expose a
-command-line binary. Incomplete commands stay absent until target-exclusion
-behavior, ploidy input, gVCF behavior, complete command orchestration, and
-oracle and performance gates pass.
+allele-indexed fields when callers trim alternates. Typed ploidy resolution
+supports constant, GRCh37, GRCh38, and checked custom definitions with
+sex-aware or fixed sample assignments and allocation-free repeated queries. It
+does not yet expose a command-line binary. Incomplete commands stay absent
+until target-exclusion behavior, gVCF behavior, complete command orchestration,
+and oracle and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample
@@ -57,6 +59,9 @@ attribution and licenses are retained in `THIRD_PARTY_LICENSES.md`,
 Pileup annotations and caller-side bias tests follow bcftools 1.24 `bam2bcf.c`,
 `ccall.c`, and `mcall.c`; Fisher exact and related numerical kernels follow
 HTSlib 1.24 `kfunc.c`. Their MIT notices are retained in the same license files.
+
+Ploidy presets, custom definitions, and sample binding follow bcftools 1.24
+`ploidy.c` and `vcfcall.c` under the retained bcftools MIT notice.
 
 The revised MAQ error model follows HTSlib 1.24 `errmod.c`, Copyright Broad
 Institute and Genome Research Ltd., under the MIT/Expat license retained in

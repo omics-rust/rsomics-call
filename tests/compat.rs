@@ -7,8 +7,8 @@ use noodles::vcf::variant::io::Write as _;
 use noodles::{bam, sam, vcf};
 use rsomics_call::{
     AlignmentInput, CalledVcfSchema, IndelLikelihoodConfig, LikelihoodSite,
-    LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, SampleSelection,
-    SnpLikelihoodConfig, SnpLikelihoodRun,
+    LikelihoodVariantReader, LikelihoodVcfSchema, MultiallelicCaller, PloidyDefinition,
+    PloidyPreset, SamplePloidy, SampleSelection, SnpLikelihoodConfig, SnpLikelihoodRun,
 };
 use rsomics_pileup::PileupOptions;
 
@@ -189,6 +189,117 @@ fn multiallelic_call_annotations_match_bcftools_1_24() {
         assert_eq!(actual.info().as_ref().get(key), Some(value), "INFO/{key}");
     }
     assert_eq!(actual.samples().keys(), expected.samples().keys());
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
+fn grch37_ploidy_preset_matches_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("ploidy.vcf");
+    let samples = directory.path().join("samples.txt");
+    fs::write(&samples, "male M\nfemale F\n").unwrap();
+    let sites = [
+        ("X", 1u64),
+        ("X", 60_001),
+        ("X", 2_699_521),
+        ("Y", 1),
+        ("MT", 1),
+        ("chrX", 1),
+        ("chrY", 1),
+        ("chrM", 1),
+    ];
+    let mut data = "##fileformat=VCFv4.2\n\
+                    ##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+                    ##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Genotype likelihoods\">\n"
+        .to_owned();
+    for reference in ["X", "Y", "MT", "chrX", "chrY", "chrM"] {
+        data.push_str(&format!("##contig=<ID={reference},length=200000000>\n"));
+    }
+    data.push_str("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tmale\tfemale\n");
+    for &(reference, position) in &sites {
+        data.push_str(&format!(
+            "{reference}\t{position}\t.\tA\tG,<*>\t.\t.\tQS=1,0,0\tPL\t0,100,200,100,200,200\t0,100,200,100,200,200\n"
+        ));
+    }
+    fs::write(&input, data).unwrap();
+
+    let output = Command::new(bcftools())
+        .args(["call", "-m", "--ploidy", "GRCh37", "-S"])
+        .arg(&samples)
+        .arg("-Ov")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let observed = called_genotypes(&output.stdout);
+    let resolver = PloidyDefinition::preset(PloidyPreset::Grch37)
+        .resolver([SamplePloidy::sex("M"), SamplePloidy::sex("F")])
+        .unwrap();
+    let expected = sites
+        .iter()
+        .map(|&(reference, position)| {
+            let ploidies = resolver.resolve(reference, position - 1).unwrap();
+            (
+                reference.to_owned(),
+                position,
+                genotype_for_ploidy(ploidies[0]).to_owned(),
+                genotype_for_ploidy(ploidies[1]).to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(observed, expected);
+
+    let custom = directory.path().join("ploidy.txt");
+    fs::write(
+        &custom,
+        "X 1 60000 M 1\nX 2699521 154931043 M 1\nY 1 59373566 M 1\nY 1 59373566 F 0\nMT 1 16569 M 1\nMT 1 16569 F 1\nchrX 1 60000 M 1\nchrX 2699521 154931043 M 1\nchrY 1 59373566 M 1\nchrY 1 59373566 F 0\nchrM 1 16569 M 1\nchrM 1 16569 F 1\n* * * M 2\n* * * F 2\n",
+    )
+    .unwrap();
+    let output = Command::new(bcftools())
+        .args(["call", "-m", "--ploidy-file"])
+        .arg(&custom)
+        .arg("-S")
+        .arg(&samples)
+        .arg("-Ov")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(called_genotypes(&output.stdout), expected);
+}
+
+fn called_genotypes(data: &[u8]) -> Vec<(String, u64, String, String)> {
+    String::from_utf8(data.to_vec())
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (
+                fields[0].to_owned(),
+                fields[1].parse::<u64>().unwrap(),
+                fields[9].split(':').next().unwrap().to_owned(),
+                fields[10].split(':').next().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn genotype_for_ploidy(ploidy: rsomics_call::CallPloidy) -> &'static str {
+    match ploidy {
+        rsomics_call::CallPloidy::Absent => ".",
+        rsomics_call::CallPloidy::Haploid => "0",
+        rsomics_call::CallPloidy::Diploid => "0/0",
+    }
 }
 
 fn bcftools_indel(reference: &Path, alignments: &[PathBuf]) -> LikelihoodSite {
