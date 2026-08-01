@@ -58,8 +58,8 @@ pub enum CallError {
         message: String,
     },
 
-    #[error("likelihood sample selection must be configured before reading records")]
-    LateLikelihoodSampleSelection,
+    #[error("likelihood reader configuration must be completed before reading records")]
+    LateLikelihoodReaderConfiguration,
 
     #[error("alignment source ID {0} is duplicated")]
     DuplicateAlignmentSource(u32),
@@ -164,6 +164,9 @@ pub enum CallError {
 
     #[error("the prior chromosome count is outside the cohort ploidy range")]
     InvalidPriorChromosomeCount,
+
+    #[error("prior allele counts are inconsistent with the site alleles or total")]
+    InvalidPriorAlleleCounts,
 
     #[error("gVCF depth thresholds must be strictly increasing")]
     InvalidGvcfThresholds,

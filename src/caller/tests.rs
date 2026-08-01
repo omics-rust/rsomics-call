@@ -28,6 +28,41 @@ fn two_sample_site() -> LikelihoodSite {
     .unwrap()
 }
 
+fn three_sample_triallelic_site() -> LikelihoodSite {
+    LikelihoodSite::new(
+        0,
+        0,
+        Allele::new(&b"A"[..]).unwrap(),
+        [
+            Allele::new(&b"G"[..]).unwrap(),
+            Allele::new(&b"C"[..]).unwrap(),
+            Allele::new(&b"<*>"[..]).unwrap(),
+        ],
+        [1.0, 1.0, 1.0, 0.0],
+        [
+            SampleLikelihood::observed(
+                Ploidy::new(2).unwrap(),
+                [0, 3, 40, 3, 40, 40, 3, 40, 40, 40],
+                SampleEvidence::new(1, [1, 0, 0, 0], [40, 0, 0, 0]).unwrap(),
+            )
+            .unwrap(),
+            SampleLikelihood::observed(
+                Ploidy::new(2).unwrap(),
+                [40, 40, 40, 3, 3, 0, 40, 40, 3, 40],
+                SampleEvidence::new(1, [0, 0, 1, 0], [0, 0, 40, 0]).unwrap(),
+            )
+            .unwrap(),
+            SampleLikelihood::observed(
+                Ploidy::new(2).unwrap(),
+                [40, 3, 0, 40, 3, 40, 40, 3, 40, 40],
+                SampleEvidence::new(1, [0, 1, 0, 0], [0, 40, 0, 0]).unwrap(),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+}
+
 #[test]
 fn matches_bcftools_1_24_two_sample_multiallelic_call() {
     let site = two_sample_site();
@@ -286,6 +321,20 @@ fn keep_alternates_preserves_unused_allele_dimensions() {
     assert_eq!(retained.allele_counts(), &[2, 2, 0]);
     assert_eq!(retained.samples()[0].phred_likelihoods().unwrap().len(), 6);
     assert_eq!(retained.samples()[0].evidence().allele_depths().len(), 3);
+}
+
+#[test]
+fn prior_allele_counts_change_multiallelic_selection() {
+    for (counts, expected) in [([0, 90, 0], b"G".as_slice()), ([90, 0, 0], b"C".as_slice())] {
+        let site = three_sample_triallelic_site()
+            .with_prior_allele_counts(crate::PriorAlleleCounts::new(100, counts).unwrap())
+            .unwrap();
+        let called = MultiallelicCaller::default().call(&site).unwrap();
+        assert_eq!(called.alternates().len(), 1);
+        assert_eq!(called.alternates()[0].as_bytes(), expected);
+        assert_eq!(called.prior_allele_counts().unwrap().total(), 10);
+        assert_eq!(called.prior_allele_counts().unwrap().alternates().len(), 1);
+    }
 }
 
 #[test]

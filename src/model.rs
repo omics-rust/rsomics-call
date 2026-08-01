@@ -295,6 +295,47 @@ impl IndelSummary {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PriorAlleleCounts {
+    total: u32,
+    alternates: Box<[u32]>,
+}
+
+impl PriorAlleleCounts {
+    pub fn new(total: u32, alternates: impl Into<Box<[u32]>>) -> Result<Self> {
+        let alternates = alternates.into();
+        let alternate_total = alternates.iter().try_fold(0u32, |sum, &count| {
+            sum.checked_add(count)
+                .ok_or(CallError::InvalidPriorAlleleCounts)
+        })?;
+        if alternate_total > total {
+            return Err(CallError::InvalidPriorAlleleCounts);
+        }
+        Ok(Self { total, alternates })
+    }
+
+    pub fn total(&self) -> u32 {
+        self.total
+    }
+
+    pub fn alternates(&self) -> &[u32] {
+        &self.alternates
+    }
+
+    pub(crate) fn select(&self, retained: &[usize]) -> Self {
+        let reference = self.total - self.alternates.iter().sum::<u32>();
+        let alternates = retained
+            .iter()
+            .skip(1)
+            .map(|&index| self.alternates[index - 1])
+            .collect::<Box<[_]>>();
+        Self {
+            total: reference + alternates.iter().sum::<u32>(),
+            alternates,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SiteAnnotations {
     raw_depth: u32,
@@ -446,6 +487,7 @@ pub struct LikelihoodSite {
     samples: Box<[SampleLikelihood]>,
     indel_summary: Option<IndelSummary>,
     annotations: Option<SiteAnnotations>,
+    prior_allele_counts: Option<PriorAlleleCounts>,
 }
 
 impl LikelihoodSite {
@@ -495,6 +537,7 @@ impl LikelihoodSite {
             samples,
             indel_summary: None,
             annotations: None,
+            prior_allele_counts: None,
         })
     }
 
@@ -506,6 +549,14 @@ impl LikelihoodSite {
     pub fn with_annotations(mut self, annotations: SiteAnnotations) -> Self {
         self.annotations = Some(annotations);
         self
+    }
+
+    pub fn with_prior_allele_counts(mut self, counts: PriorAlleleCounts) -> Result<Self> {
+        if counts.alternates.len() != self.alternates.len() {
+            return Err(CallError::InvalidPriorAlleleCounts);
+        }
+        self.prior_allele_counts = Some(counts);
+        Ok(self)
     }
 
     pub fn reference_sequence_id(&self) -> usize {
@@ -538,6 +589,10 @@ impl LikelihoodSite {
 
     pub fn annotations(&self) -> Option<&SiteAnnotations> {
         self.annotations.as_ref()
+    }
+
+    pub fn prior_allele_counts(&self) -> Option<&PriorAlleleCounts> {
+        self.prior_allele_counts.as_ref()
     }
 }
 
@@ -614,6 +669,25 @@ mod tests {
                 []
             ),
             Err(CallError::InvalidLikelihoodDimensions)
+        );
+
+        assert_eq!(
+            PriorAlleleCounts::new(3, [2, 2]),
+            Err(CallError::InvalidPriorAlleleCounts)
+        );
+        let counts = PriorAlleleCounts::new(4, [1, 1]).unwrap();
+        let site = LikelihoodSite::new(
+            0,
+            9,
+            Allele::new(&b"A"[..]).unwrap(),
+            [Allele::new(&b"G"[..]).unwrap()],
+            [1.0, 1.0],
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            site.with_prior_allele_counts(counts),
+            Err(CallError::InvalidPriorAlleleCounts)
         );
     }
 }

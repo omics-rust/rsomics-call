@@ -105,6 +105,10 @@ impl ConsensusCaller {
             })
             .collect::<Result<Vec<_>>>()?;
         let alternates = site.alternates()[..output_allele_count - 1].to_vec();
+        let retained = (0..output_allele_count).collect::<Vec<_>>();
+        let prior_allele_counts = site
+            .prior_allele_counts()
+            .map(|counts| counts.select(&retained));
 
         Ok(CalledSite {
             reference_sequence_id: site.reference_sequence_id(),
@@ -117,6 +121,7 @@ impl ConsensusCaller {
             indel_summary: site.indel_summary(),
             annotations: site.annotations().map(CalledAnnotations::consensus),
             gvcf: None,
+            prior_allele_counts,
         })
     }
 }

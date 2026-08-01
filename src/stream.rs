@@ -74,6 +74,17 @@ where
         Ok(self)
     }
 
+    pub fn with_prior_frequencies(
+        mut self,
+        total_alleles_tag: impl Into<String>,
+        alternate_counts_tag: impl Into<String>,
+    ) -> Result<Self> {
+        self.require_unread()?;
+        self.projection
+            .set_prior_frequency_tags(total_alleles_tag, alternate_counts_tag)?;
+        Ok(self)
+    }
+
     pub fn read_site(&mut self) -> Result<Option<LikelihoodSite>> {
         self.started = true;
         let record_number = self.record_number + 1;
@@ -101,7 +112,7 @@ where
 
     fn require_unread(&self) -> Result<()> {
         if self.started {
-            return Err(CallError::LateLikelihoodSampleSelection);
+            return Err(CallError::LateLikelihoodReaderConfiguration);
         }
         Ok(())
     }
@@ -144,6 +155,16 @@ impl IndexedLikelihoodVariantReader {
         samples: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Result<Self> {
         self.projection.exclude_samples(samples)?;
+        Ok(self)
+    }
+
+    pub fn with_prior_frequencies(
+        mut self,
+        total_alleles_tag: impl Into<String>,
+        alternate_counts_tag: impl Into<String>,
+    ) -> Result<Self> {
+        self.projection
+            .set_prior_frequency_tags(total_alleles_tag, alternate_counts_tag)?;
         Ok(self)
     }
 
@@ -395,6 +416,18 @@ impl LikelihoodProjection {
             .decode_selected_likelihood(record, &self.sample_indices)
     }
 
+    pub(crate) fn set_prior_frequency_tags(
+        &mut self,
+        total: impl Into<String>,
+        alternates: impl Into<String>,
+    ) -> Result<()> {
+        let total = total.into();
+        let alternates = alternates.into();
+        self.input_schema
+            .set_prior_frequency_tags(total.clone(), alternates.clone())?;
+        self.schema.set_prior_frequency_tags(total, alternates)
+    }
+
     fn set_sample_indices(&mut self, indices: Vec<usize>) -> Result<()> {
         if indices.is_empty() {
             return Err(CallError::InvalidSampleCount);
@@ -406,7 +439,14 @@ impl LikelihoodProjection {
                 .sample_names_mut()
                 .insert(self.input_schema.header().sample_names()[index].clone());
         }
+        let prior_frequency_tags = self
+            .schema
+            .prior_frequency_tags()
+            .map(|(total, alternates)| (total.to_owned(), alternates.to_owned()));
         self.schema = LikelihoodVcfSchema::from_header(header)?;
+        if let Some((total, alternates)) = prior_frequency_tags {
+            self.schema.set_prior_frequency_tags(total, alternates)?;
+        }
         self.sample_indices = indices.into_boxed_slice();
         Ok(())
     }

@@ -36,8 +36,8 @@ pub use format::{CalledVcfSchema, LikelihoodVcfSchema};
 pub use gvcf::GvcfBlocker;
 pub use indel::{IndelLikelihoodConfig, IndelSiteBuilder};
 pub use model::{
-    Allele, IndelSummary, LikelihoodSite, Ploidy, SampleAnnotations, SampleEvidence,
-    SampleLikelihood, SiteAnnotations,
+    Allele, IndelSummary, LikelihoodSite, Ploidy, PriorAlleleCounts, SampleAnnotations,
+    SampleEvidence, SampleLikelihood, SiteAnnotations,
 };
 pub use ploidy::{PloidyDefinition, PloidyPreset, PloidyResolver, SamplePloidy};
 pub use run::SnpLikelihoodRun;

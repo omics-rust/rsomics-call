@@ -26,9 +26,9 @@ use noodles::{
 };
 
 use crate::{
-    Allele, CallError, CalledAnnotations, CalledSite, IndelSummary, LikelihoodSite, Ploidy, Result,
-    SampleAnnotations, SampleEvidence, SampleLikelihood, SiteAnnotations,
-    model::SiteAnnotationValues,
+    Allele, CallError, CalledAnnotations, CalledSite, IndelSummary, LikelihoodSite, Ploidy,
+    PriorAlleleCounts, Result, SampleAnnotations, SampleEvidence, SampleLikelihood,
+    SiteAnnotations, model::SiteAnnotationValues,
 };
 
 const QUALITY_SUM: &str = "QS";
@@ -69,11 +69,19 @@ const MIN_DP: &str = "MIN_DP";
 #[derive(Clone, Debug)]
 pub struct LikelihoodVcfSchema {
     header: vcf::Header,
+    prior_frequency_tags: Option<PriorFrequencyTags>,
 }
 
 #[derive(Clone, Debug)]
 pub struct CalledVcfSchema {
     header: vcf::Header,
+    prior_frequency_tags: Option<PriorFrequencyTags>,
+}
+
+#[derive(Clone, Debug)]
+struct PriorFrequencyTags {
+    total: String,
+    alternates: String,
 }
 
 impl LikelihoodVcfSchema {
@@ -426,11 +434,48 @@ impl LikelihoodVcfSchema {
             FormatType::Integer,
             false,
         )?;
-        Ok(Self { header })
+        Ok(Self {
+            header,
+            prior_frequency_tags: None,
+        })
     }
 
     pub fn header(&self) -> &vcf::Header {
         &self.header
+    }
+
+    pub(crate) fn set_prior_frequency_tags(
+        &mut self,
+        total: impl Into<String>,
+        alternates: impl Into<String>,
+    ) -> Result<()> {
+        let total = total.into();
+        let alternates = alternates.into();
+        if total.is_empty() || alternates.is_empty() || total == alternates {
+            return Err(invalid(
+                "prior-frequency INFO tags must be distinct and nonempty",
+            ));
+        }
+        require_info(
+            &self.header,
+            &total,
+            InfoNumber::Count(1),
+            InfoType::Integer,
+        )?;
+        require_info(
+            &self.header,
+            &alternates,
+            InfoNumber::AlternateBases,
+            InfoType::Integer,
+        )?;
+        self.prior_frequency_tags = Some(PriorFrequencyTags { total, alternates });
+        Ok(())
+    }
+
+    pub(crate) fn prior_frequency_tags(&self) -> Option<(&str, &str)> {
+        self.prior_frequency_tags
+            .as_ref()
+            .map(|tags| (tags.total.as_str(), tags.alternates.as_str()))
     }
 
     pub fn encode_likelihood(&self, site: &LikelihoodSite) -> Result<vcf::variant::RecordBuf> {
@@ -464,6 +509,12 @@ impl LikelihoodVcfSchema {
                     .collect(),
             ))),
         )]);
+        insert_prior_allele_counts(
+            &mut info,
+            self.prior_frequency_tags.as_ref(),
+            site.prior_allele_counts(),
+            false,
+        )?;
         insert_indel_info(&self.header, &mut info, site.indel_summary())?;
         if let Some(annotations) = site.annotations() {
             insert_site_annotations(&self.header, &mut info, annotations)?;
@@ -612,6 +663,11 @@ impl LikelihoodVcfSchema {
         if let Some(annotations) = decode_site_annotations(record)? {
             site = site.with_annotations(annotations);
         }
+        if let Some(tags) = &self.prior_frequency_tags
+            && let Some(counts) = decode_prior_allele_counts(record, tags, allele_count)?
+        {
+            site = site.with_prior_allele_counts(counts)?;
+        }
         Ok(site)
     }
 }
@@ -717,7 +773,10 @@ impl CalledVcfSchema {
         } else {
             header.formats_mut().shift_remove(GP);
         }
-        Self { header }
+        Self {
+            header,
+            prior_frequency_tags: schema.prior_frequency_tags.clone(),
+        }
     }
 
     pub fn header(&self) -> &vcf::Header {
@@ -777,6 +836,12 @@ impl CalledVcfSchema {
                     .map_err(|_| invalid("INFO/AN exceeds the VCF integer range"))?,
             )),
         );
+        insert_prior_allele_counts(
+            &mut info,
+            self.prior_frequency_tags.as_ref(),
+            site.prior_allele_counts(),
+            true,
+        )?;
         insert_indel_info(&self.header, &mut info, site.indel_summary())?;
         if let Some(annotations) = site.annotations() {
             insert_called_annotations(&self.header, &mut info, annotations)?;
@@ -1033,6 +1098,78 @@ fn require_optional_info(
 ) -> Result<()> {
     if header.infos().contains_key(key) {
         require_info(header, key, number, ty)?;
+    }
+    Ok(())
+}
+
+fn decode_prior_allele_counts(
+    record: &vcf::variant::RecordBuf,
+    tags: &PriorFrequencyTags,
+    allele_count: usize,
+) -> Result<Option<PriorAlleleCounts>> {
+    let Some(total) = info_integer(record, &tags.total)? else {
+        return Ok(None);
+    };
+    let Some(value) = record.info().get(&tags.alternates) else {
+        return Ok(None);
+    };
+    let Some(InfoValue::Array(InfoArray::Integer(values))) = value else {
+        return Err(invalid(format!(
+            "INFO/{} is not an integer array",
+            tags.alternates
+        )));
+    };
+    if values.len() != allele_count - 1 {
+        return Err(invalid(format!(
+            "INFO/{} does not match the record alternate alleles",
+            tags.alternates
+        )));
+    }
+    let alternates = values
+        .iter()
+        .map(|value| {
+            let value = value.ok_or_else(|| {
+                invalid(format!("INFO/{} contains a missing value", tags.alternates))
+            })?;
+            u32::try_from(value).map_err(|_| {
+                invalid(format!(
+                    "INFO/{} contains a negative integer",
+                    tags.alternates
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    PriorAlleleCounts::new(total, alternates).map(Some)
+}
+
+fn insert_prior_allele_counts(
+    info: &mut RecordInfo,
+    tags: Option<&PriorFrequencyTags>,
+    counts: Option<&PriorAlleleCounts>,
+    called: bool,
+) -> Result<()> {
+    let (Some(tags), Some(counts)) = (tags, counts) else {
+        return Ok(());
+    };
+    if !called || tags.total != AN {
+        info.insert(
+            tags.total.clone(),
+            Some(InfoValue::Integer(checked_info_integer(
+                counts.total(),
+                &tags.total,
+            )?)),
+        );
+    }
+    if (!called || tags.alternates != AC) && !counts.alternates().is_empty() {
+        let values = counts
+            .alternates()
+            .iter()
+            .map(|&count| checked_info_integer(count, &tags.alternates).map(Some))
+            .collect::<Result<Vec<_>>>()?;
+        info.insert(
+            tags.alternates.clone(),
+            Some(InfoValue::Array(InfoArray::Integer(values))),
+        );
     }
     Ok(())
 }

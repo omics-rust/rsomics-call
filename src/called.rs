@@ -1,4 +1,4 @@
-use crate::{Allele, CalledAnnotations, IndelSummary, SampleEvidence};
+use crate::{Allele, CalledAnnotations, IndelSummary, PriorAlleleCounts, SampleEvidence};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallPloidy {
@@ -94,6 +94,7 @@ pub struct CalledSite {
     pub(crate) indel_summary: Option<IndelSummary>,
     pub(crate) annotations: Option<CalledAnnotations>,
     pub(crate) gvcf: Option<GvcfSite>,
+    pub(crate) prior_allele_counts: Option<PriorAlleleCounts>,
 }
 
 impl CalledSite {
@@ -142,6 +143,10 @@ impl CalledSite {
 
     pub fn gvcf(&self) -> Option<GvcfSite> {
         self.gvcf
+    }
+
+    pub fn prior_allele_counts(&self) -> Option<&PriorAlleleCounts> {
+        self.prior_allele_counts.as_ref()
     }
 
     pub fn is_variant(&self) -> bool {

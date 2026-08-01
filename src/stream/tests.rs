@@ -170,6 +170,66 @@ fn projects_likelihood_samples_during_decode() {
 }
 
 #[test]
+fn reads_and_projects_prior_frequency_tags() {
+    let src = b"##fileformat=VCFv4.2\n\
+##contig=<ID=chr1,length=100>\n\
+##INFO=<ID=QS,Number=R,Type=Float,Description=\"Auxiliary tag used for calling\">\n\
+##INFO=<ID=PAN,Number=1,Type=Integer,Description=\"Panel allele number\">\n\
+##INFO=<ID=PAC,Number=A,Type=Integer,Description=\"Panel alternate counts\">\n\
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description=\"Likelihoods\">\n\
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n\
+chr1\t1\t.\tA\tG,<*>\t.\t.\tQS=1,1,0;PAN=10;PAC=2,0\tPL\t40,3,0,40,3,40\n";
+    let mut reader = LikelihoodVariantReader::new(&src[..])
+        .unwrap()
+        .with_prior_frequencies("PAN", "PAC")
+        .unwrap();
+    let site = reader.read_site().unwrap().unwrap();
+    assert_eq!(site.prior_allele_counts().unwrap().total(), 10);
+    assert_eq!(site.prior_allele_counts().unwrap().alternates(), &[2, 0]);
+
+    let called = MultiallelicCaller::default().call(&site).unwrap();
+    let schema = CalledVcfSchema::from_likelihood(reader.schema());
+    let mut writer =
+        CalledVariantWriter::new(Vec::new(), schema, VariantOutputFormat::Vcf).unwrap();
+    writer.write_site(&called).unwrap();
+    let output = String::from_utf8(writer.finish().unwrap()).unwrap();
+    let record = output.lines().find(|line| !line.starts_with('#')).unwrap();
+    assert!(record.split('\t').nth(7).unwrap().contains("PAN=10;PAC=2"));
+
+    let standard = String::from_utf8(src.to_vec())
+        .unwrap()
+        .replace("PAN", "AN")
+        .replace("PAC", "AC");
+    let mut reader = LikelihoodVariantReader::new(standard.as_bytes())
+        .unwrap()
+        .with_prior_frequencies("AN", "AC")
+        .unwrap();
+    let called = MultiallelicCaller::default()
+        .call(&reader.read_site().unwrap().unwrap())
+        .unwrap();
+    let schema = CalledVcfSchema::from_likelihood(reader.schema());
+    let mut writer =
+        CalledVariantWriter::new(Vec::new(), schema, VariantOutputFormat::Vcf).unwrap();
+    writer.write_site(&called).unwrap();
+    let output = String::from_utf8(writer.finish().unwrap()).unwrap();
+    let info = output
+        .lines()
+        .find(|line| !line.starts_with('#'))
+        .unwrap()
+        .split('\t')
+        .nth(7)
+        .unwrap();
+    assert!(info.contains("AC=2;AN=2"));
+
+    assert!(matches!(
+        LikelihoodVariantReader::new(&src[..])
+            .unwrap()
+            .with_prior_frequencies("missing", "PAC"),
+        Err(CallError::InvalidLikelihoodVariant(_))
+    ));
+}
+
+#[test]
 fn rejects_invalid_or_late_likelihood_sample_selection() {
     let (schema, site) = multi_sample_fixture();
     let mut writer =
@@ -199,7 +259,7 @@ fn rejects_invalid_or_late_likelihood_sample_selection() {
     reader.read_site().unwrap();
     assert!(matches!(
         reader.select_samples(["first"]),
-        Err(CallError::LateLikelihoodSampleSelection)
+        Err(CallError::LateLikelihoodReaderConfiguration)
     ));
 }
 

@@ -148,6 +148,7 @@ impl Block {
         self.site.quality = None;
         self.site.indel_summary = None;
         self.site.annotations = None;
+        self.site.prior_allele_counts = None;
         self.site.gvcf = Some(GvcfSite::new(end_position, self.minimum_depth, true));
         self.site
     }

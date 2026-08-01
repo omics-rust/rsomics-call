@@ -40,12 +40,14 @@ blocks with typed `END` and `MIN_DP` output. Likelihood sample selection is
 projected during record decoding, while call sample files preserve requested
 order and bind explicit sex or fixed ploidy through the same definition.
 Multiallelic workflows can select alleles independently for validated sample
-groups and retain unused alternate dimensions at variant sites. The call
+groups, retain unused alternate dimensions at variant sites, and incorporate
+validated integer panel allele counts from configurable prior-frequency INFO
+tags. Prior counts remain aligned when output alleles are projected. The call
 stream applies masked-reference, variant-only, and SNP/indel skip policy before
 serialization with bcftools-compatible record-type semantics. It does not yet
 expose a command-line binary. Incomplete commands stay absent until complete
-command orchestration, prior-frequency and unseen-allele policy, call-stage
-targets, target-exclusion policy, and oracle and performance gates pass.
+command orchestration, unseen-allele policy, call-stage targets,
+target-exclusion policy, and oracle and performance gates pass.
 
 The historical `rsomics-vcf-mpileup` and `rsomics-vcf-call` repositories are
 implementation and fixture sources, not dependencies. Their single-sample

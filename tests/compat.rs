@@ -844,6 +844,75 @@ fn keep_alternates_matches_bcftools_1_24() {
 
 #[test]
 #[ignore = "release oracle: requires bcftools 1.24"]
+fn prior_frequencies_match_bcftools_1_24() {
+    assert_bcftools_1_24();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("prior-frequencies.vcf");
+    let data = fs::read_to_string("tests/golden/bcftools-1.24-likelihood.vcf")
+        .unwrap()
+        .replace(
+            "#CHROM",
+            "##INFO=<ID=PAN,Number=1,Type=Integer,Description=\"Panel allele number\">\n\
+             ##INFO=<ID=PAC,Number=A,Type=Integer,Description=\"Panel alternate counts\">\n\
+             #CHROM",
+        )
+        .replace("DP=3;", "DP=3;PAN=100;PAC=0,90,0;");
+    fs::write(&input, &data).unwrap();
+    let expected = Command::new(bcftools())
+        .args(["call", "-m", "-F", "PAN,PAC", "-a", "GP,GQ", "-Ov"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+
+    let reader = LikelihoodVariantReader::new(data.as_bytes())
+        .unwrap()
+        .with_prior_frequencies("PAN", "PAC")
+        .unwrap();
+    let resolver = PloidyDefinition::preset(PloidyPreset::Diploid)
+        .default_resolver(3)
+        .unwrap();
+    let actual = LikelihoodCallRun::new(
+        CallModel::Multiallelic(MultiallelicCallerConfig::default()),
+        resolver,
+    )
+    .run(reader, Vec::new(), rsomics_call::VariantOutputFormat::Vcf)
+    .unwrap();
+    assert_eq!(
+        called_allele_signature(&actual),
+        called_allele_signature(&expected.stdout)
+    );
+    let quality = |output: &[u8]| {
+        String::from_utf8(output.to_vec())
+            .unwrap()
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .unwrap()
+            .split('\t')
+            .nth(5)
+            .unwrap()
+            .parse::<f32>()
+            .unwrap()
+    };
+    assert!((quality(&actual) - quality(&expected.stdout)).abs() < 1e-4);
+    let actual_info = String::from_utf8(actual)
+        .unwrap()
+        .lines()
+        .find(|line| !line.starts_with('#'))
+        .unwrap()
+        .split('\t')
+        .nth(7)
+        .unwrap()
+        .to_owned();
+    assert!(actual_info.contains("PAN=10;PAC=0"));
+}
+
+#[test]
+#[ignore = "release oracle: requires bcftools 1.24"]
 fn grch37_ploidy_preset_matches_bcftools_1_24() {
     assert_bcftools_1_24();
     let directory = tempfile::tempdir().unwrap();

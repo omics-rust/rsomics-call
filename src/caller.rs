@@ -216,6 +216,9 @@ impl MultiallelicCaller {
             .filter_map(|(index, allele)| old_to_new[index].map(|_| allele.clone()));
         let reference = alleles.next().unwrap();
         let alternates = alleles.collect::<Vec<_>>().into_boxed_slice();
+        let prior_allele_counts = site
+            .prior_allele_counts()
+            .map(|counts| counts.select(&retained));
 
         Ok(CalledSite {
             reference_sequence_id: site.reference_sequence_id(),
@@ -228,6 +231,7 @@ impl MultiallelicCaller {
             indel_summary: site.indel_summary(),
             annotations: site.annotations().map(CalledAnnotations::multiallelic),
             gvcf: None,
+            prior_allele_counts,
         })
     }
 }
@@ -297,7 +301,12 @@ fn caller_groups(
     log_prior: f64,
 ) -> Result<Vec<GroupCall>> {
     let Some(sample_groups) = sample_groups else {
-        let quality_sums = normalized_quality_sums(site.allele_quality_sums());
+        let quality_sums = normalized_quality_sums(
+            site.allele_quality_sums()
+                .iter()
+                .map(|&value| f64::from(value)),
+            site.prior_allele_counts(),
+        );
         let selection = select_alleles(
             sample_likelihoods,
             &quality_sums,
@@ -327,14 +336,11 @@ fn caller_groups(
     Ok(quality_sums
         .into_iter()
         .zip(&members)
-        .map(|(mut quality_sums, members)| {
-            let total = quality_sums.iter().sum::<f32>();
-            if total != 0.0 {
-                for value in &mut quality_sums {
-                    *value /= total;
-                }
-            }
-            let quality_sums = quality_sums.into_iter().map(f64::from).collect::<Vec<_>>();
+        .map(|(quality_sums, members)| {
+            let quality_sums = normalized_quality_sums(
+                quality_sums.into_iter().map(f64::from),
+                site.prior_allele_counts(),
+            );
             let selection = select_alleles(
                 sample_likelihoods,
                 &quality_sums,
@@ -760,15 +766,29 @@ fn normalized_likelihoods(sample: &SampleLikelihood, genotype_count: usize) -> V
     likelihoods
 }
 
-fn normalized_quality_sums(values: &[f32]) -> Vec<f64> {
-    let total = values.iter().sum::<f32>();
+fn normalized_quality_sums(
+    values: impl IntoIterator<Item = f64>,
+    prior: Option<&crate::PriorAlleleCounts>,
+) -> Vec<f64> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    if let Some(prior) = prior
+        && prior.total() != 0
+    {
+        let alternate_total = prior
+            .alternates()
+            .iter()
+            .map(|&count| u64::from(count))
+            .sum::<u64>();
+        values[0] += 0.5 * (u64::from(prior.total()) - alternate_total) as f64;
+        for (value, &count) in values[1..].iter_mut().zip(prior.alternates()) {
+            *value += 0.5 * f64::from(count);
+        }
+    }
+    let total = values.iter().sum::<f64>();
     if total == 0.0 {
         return vec![0.0; values.len()];
     }
-    values
-        .iter()
-        .map(|&value| f64::from(value / total))
-        .collect()
+    values.into_iter().map(|value| value / total).collect()
 }
 
 fn adjusted_log_prior(mutation_rate: f64, chromosome_count: usize) -> f64 {
