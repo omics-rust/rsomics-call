@@ -65,6 +65,31 @@ and had SHA-256
 The bcftools binary had SHA-256
 `50b8f25b1dd20ca1b0c9ffa76f0f2e4684515764ee4af1c190debd9ece490c5d`.
 
+## Pileup record-state regression gate
+
+Revision `8f29a887dc96` moves per-record CIGAR metrics into the retained state
+provided by `rsomics-pileup` 0.9.0 and updates `rsomics-bamio` and
+`rsomics-common` to their current foundation releases. A Linux `x86_64`
+regression gate rebuilt both this revision and published release head
+`b34cc226242ba` with rustc 1.91.0, pinned each command to CPU 20, and used the
+same 5 Mb, 30x fixture and fused `run` command as the release benchmark.
+
+Both binaries emitted 5,024 normalized calls with SHA-256
+`f5b6f9d78aba94c81d4c263acc969bafbf19284b278dc1d239915326d2ac43ee`.
+After one warm-up, five candidate rounds had a 34.081 s median and
+34.583 ± 0.861 s mean. The published baseline had a 50.635 s median and
+48.296 ± 10.573 s mean under high concurrent machine load. Three alternating
+RSS rounds per binary were all 22,400 KiB. This gate establishes no regression
+from the foundation migration; the lower-variance upstream comparison above
+remains the release performance claim.
+
+The candidate and baseline binary SHA-256 values were respectively
+`e8acf12c12331a841f34452cbb2191156d01900aab60350395d9d851cd11c204`
+and `233c1bfcf66bba6b6086f63751c950f45698d0ca6b0afdd9fcb62e450089f116`.
+The Hyperfine JSON and RSS ledger have SHA-256
+`d77775dd8480d44e28f6ef58e49f029c911ce7137975680418c8b7a50801b253`
+and `eedc13e2f8da730ba7c1079ef1be6f6146c5b61f92ad74baf4572deb412da096`.
+
 ## Reproduction
 
 `benchmarks/call-vs-bcftools.sh` records the machine, tool versions, binary and
