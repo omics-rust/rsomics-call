@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-call"
-version = "0.1.0"
+version = "0.1.1"
 description = "Typed alignment likelihood and small-variant calling workflow"
 edition = "2024"
 rust-version = "1.91"
