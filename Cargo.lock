@@ -660,9 +660,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rsomics-bamio"
-version = "0.4.1"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ff830a8263e4a5c8784101c3d6674e4bd86ec8ced446327d94d35731db13600"
+checksum = "22c629df18b27af31c4e6c79f318bd96d240e8e4b6c64aa6f6735354db6b7855"
 dependencies = [
  "crossbeam-channel",
  "libdeflater",
@@ -692,11 +692,12 @@ dependencies = [
 
 [[package]]
 name = "rsomics-common"
-version = "0.10.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a69695dae27897693c49ebedd96355dc9a5decb9f21956f0e8d9c5ce135a5ec"
+checksum = "7a6f75d9418b63e807e9e33ec93bebea77469a3adeff9772b22674a5e021b413"
 dependencies = [
  "clap",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",
@@ -714,9 +715,9 @@ dependencies = [
 
 [[package]]
 name = "rsomics-pileup"
-version = "0.4.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d33b5fa1c3ddbe86c8f53c2bb3fa870e482e90957aa5e559fceca0600ff56533"
+checksum = "beae57811926a88c28ee0de8923dc7edb8d87ffe9c0afba9b47bd771a279f39e"
 dependencies = [
  "rsomics-bamio",
  "thiserror",

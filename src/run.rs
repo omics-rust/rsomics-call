@@ -14,6 +14,7 @@ use crate::{
     LikelihoodCallRun, LikelihoodSite, LikelihoodVcfSchema, Nucleotide, ReferenceSequence, Result,
     SampleMap, SampleSelection, SnpLikelihoodConfig, SnpSiteBuilder, VariantOutputFormat,
     alignment::IndexedAlignmentSet,
+    annotation::PileupRecordState,
     selection::{
         ReferenceRange, RegionSelection, TargetSet, normalize_region_file, normalize_regions,
     },
@@ -24,7 +25,7 @@ pub struct SnpLikelihoodRun {
     reference_lengths: Box<[u64]>,
     pileup_options: PileupOptions,
     reference: Option<ReferenceCache>,
-    pileup: PileupEngine,
+    pileup: PileupEngine<PileupRecordState>,
     sites: SnpSiteBuilder,
     indels: Option<IndelSiteBuilder>,
     baq: Option<BaqRun>,
@@ -242,7 +243,8 @@ impl SnpLikelihoodRun {
             .iter()
             .map(ReferenceSequence::length)
             .collect::<Box<[_]>>();
-        let pileup = PileupEngine::new(reference_lengths.iter().copied(), pileup_options);
+        let pileup =
+            PileupEngine::with_record_state(reference_lengths.iter().copied(), pileup_options);
         let sites = SnpSiteBuilder::new(alignments.samples().samples().len(), likelihood_config)?;
         let reference = reference
             .map(|path| ReferenceCache::open(path, alignments.reference_sequences()))
@@ -331,7 +333,11 @@ impl SnpLikelihoodRun {
         match &mut self.alignments {
             AlignmentRun::Sequential(alignments) => {
                 while let Some((source_id, record)) = alignments.next_record()? {
-                    pipeline.pileup.push_with_source(source_id, record)?;
+                    pipeline.pileup.push_with_source_and_state(
+                        source_id,
+                        record,
+                        PileupRecordState::default(),
+                    )?;
                     drain_sites(&mut pipeline, alignments.samples(), &mut emit)?;
                 }
                 pipeline.pileup.finish()?;
@@ -341,13 +347,17 @@ impl SnpLikelihoodRun {
                 for (index, region) in regions.iter().enumerate() {
                     pipeline.region = Some(region.bounds);
                     set.visit_region(&region.query, |samples, source_id, record| {
-                        pipeline.pileup.push_with_source(source_id, record)?;
+                        pipeline.pileup.push_with_source_and_state(
+                            source_id,
+                            record,
+                            PileupRecordState::default(),
+                        )?;
                         drain_sites(&mut pipeline, samples, &mut emit)
                     })?;
                     pipeline.pileup.finish()?;
                     drain_sites(&mut pipeline, set.samples(), &mut emit)?;
                     if index + 1 < regions.len() {
-                        *pipeline.pileup = PileupEngine::new(
+                        *pipeline.pileup = PileupEngine::with_record_state(
                             self.reference_lengths.iter().copied(),
                             self.pileup_options,
                         );
@@ -386,7 +396,7 @@ impl SnpLikelihoodRun {
 }
 
 struct LikelihoodPipeline<'a> {
-    pileup: &'a mut PileupEngine,
+    pileup: &'a mut PileupEngine<PileupRecordState>,
     reference: Option<&'a mut ReferenceCache>,
     sites: &'a mut SnpSiteBuilder,
     indels: &'a mut Option<IndelSiteBuilder>,
@@ -448,11 +458,11 @@ fn drain_sites(
             Some(reference) => reference.base(column.reference_id(), column.position())?,
             None => Nucleotide::N,
         };
-        let site = pipeline
-            .sites
-            .build(&column, reference_base, |source_id, record| {
-                samples.sample_index(source_id, record)
-            })?;
+        let site = pipeline.sites.build_with_record_state(
+            &column,
+            reference_base,
+            |source_id, record| samples.sample_index(source_id, record),
+        )?;
         emit(site)?;
         if let Some(indels) = pipeline.indels {
             let reference = pipeline
@@ -464,7 +474,7 @@ fn drain_sites(
                 buffer.extend_from_slice(reference.sequence(column.reference_id(), range)?);
                 Ok::<_, CallError>(())
             };
-            if let Some(site) = indels.build(
+            if let Some(site) = indels.build_with_record_state(
                 &column,
                 reference_length,
                 |source_id, record| samples.sample_index(source_id, record),

@@ -1,12 +1,15 @@
 use std::ops::Range;
 
 use rsomics_bamio::raw::RawRecord;
-use rsomics_pileup::{Column, PileupRead};
+use rsomics_pileup::{Column, ColumnEntry, PileupRead};
 
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, IndelSummary, LikelihoodMatrix, LikelihoodSite,
     Nucleotide, Ploidy, Result, SampleEvidence, SampleLikelihood,
-    annotation::{AnnotationEvidence, AnnotationObservation, CigarMetrics, site_annotations},
+    annotation::{
+        AnnotationEvidence, AnnotationObservation, CigarMetrics, PileupRecordState,
+        site_annotations,
+    },
     glocal,
 };
 
@@ -163,8 +166,47 @@ impl IndelSiteBuilder {
         &mut self,
         column: &Column<'_>,
         reference_length: usize,
+        sample_index: impl FnMut(u32, &RawRecord) -> Result<Option<usize>>,
+        fetch_reference: F,
+    ) -> Result<Option<LikelihoodSite>>
+    where
+        F: FnMut(Range<usize>, &mut Vec<u8>) -> Result<()>,
+    {
+        self.build_with(
+            column,
+            reference_length,
+            sample_index,
+            fetch_reference,
+            |entry| CigarMetrics::new(entry.cigar()),
+        )
+    }
+
+    pub(crate) fn build_with_record_state<F>(
+        &mut self,
+        column: &Column<'_, PileupRecordState>,
+        reference_length: usize,
+        sample_index: impl FnMut(u32, &RawRecord) -> Result<Option<usize>>,
+        fetch_reference: F,
+    ) -> Result<Option<LikelihoodSite>>
+    where
+        F: FnMut(Range<usize>, &mut Vec<u8>) -> Result<()>,
+    {
+        self.build_with(
+            column,
+            reference_length,
+            sample_index,
+            fetch_reference,
+            |entry| entry.state().cigar(entry.cigar()),
+        )
+    }
+
+    fn build_with<S, F>(
+        &mut self,
+        column: &Column<'_, S>,
+        reference_length: usize,
         mut sample_index: impl FnMut(u32, &RawRecord) -> Result<Option<usize>>,
         mut fetch_reference: F,
+        mut metrics: impl FnMut(ColumnEntry<'_, S>) -> CigarMetrics,
     ) -> Result<Option<LikelihoodSite>>
     where
         F: FnMut(Range<usize>, &mut Vec<u8>) -> Result<()>,
@@ -189,7 +231,7 @@ impl IndelSiteBuilder {
                     count: self.sample_count,
                 });
             }
-            let cigar_metrics = CigarMetrics::new(entry.cigar());
+            let cigar_metrics = metrics(entry);
             let cigar = entry
                 .cigar()
                 .map(|(kind, length)| (kind, length as usize))

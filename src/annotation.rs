@@ -1,4 +1,4 @@
-use std::sync::LazyLock;
+use std::{cell::Cell, sync::LazyLock};
 
 use rsomics_bamio::raw::RawRecord;
 use rsomics_pileup::PileupRead;
@@ -15,7 +15,7 @@ const EMPTY_QUALITY_BINS: [u64; QUALITY_BINS] = [0; QUALITY_BINS];
 static ERROR_PROBABILITIES: LazyLock<[f64; 64]> =
     LazyLock::new(|| std::array::from_fn(|quality| 10.0f64.powf(-0.1 * quality as f64)));
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CigarMetrics {
     left_soft_clip: usize,
     right_soft_clip: usize,
@@ -59,6 +59,21 @@ impl CigarMetrics {
             has_soft_clip,
             mismatch_adjustment,
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PileupRecordState {
+    cigar: Cell<Option<CigarMetrics>>,
+}
+
+impl PileupRecordState {
+    pub(crate) fn cigar(&self, values: impl IntoIterator<Item = (u8, u32)>) -> CigarMetrics {
+        self.cigar.get().unwrap_or_else(|| {
+            let cigar = CigarMetrics::new(values);
+            self.cigar.set(Some(cigar));
+            cigar
+        })
     }
 }
 
@@ -912,6 +927,16 @@ pub(crate) fn ln_gamma(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pileup_record_state_computes_cigar_metrics_once() {
+        let state = PileupRecordState::default();
+        let first = state.cigar([(4, 2), (0, 10)]);
+        let second = state.cigar([(0, 3)]);
+
+        assert_eq!(first, second);
+        assert_ne!(first, CigarMetrics::new([(0, 3)]));
+    }
 
     #[test]
     fn fisher_exact_matches_htslib_cases() {

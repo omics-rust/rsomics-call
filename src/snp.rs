@@ -1,11 +1,14 @@
 use rsomics_bamio::raw::RawRecord;
-use rsomics_pileup::Column;
+use rsomics_pileup::{Column, ColumnEntry};
 use smallvec::SmallVec;
 
 use crate::{
     Allele, BaseObservation, CallError, ErrorModel, LikelihoodMatrix, LikelihoodSite, Nucleotide,
     Ploidy, Result, SampleEvidence, SampleLikelihood,
-    annotation::{AnnotationEvidence, AnnotationObservation, CigarMetrics, site_annotations},
+    annotation::{
+        AnnotationEvidence, AnnotationObservation, CigarMetrics, PileupRecordState,
+        site_annotations,
+    },
 };
 
 const NUCLEOTIDE: [Nucleotide; 16] = [
@@ -90,12 +93,30 @@ impl SnpEvidence {
         model: &mut ErrorModel,
         observations: &mut Vec<BaseObservation>,
     ) -> Result<Self> {
+        Self::from_column_with(
+            column,
+            reference_base,
+            config,
+            model,
+            observations,
+            |entry| CigarMetrics::new(entry.cigar()),
+        )
+    }
+
+    fn from_column_with<S>(
+        column: &Column<'_, S>,
+        reference_base: Nucleotide,
+        config: SnpLikelihoodConfig,
+        model: &mut ErrorModel,
+        observations: &mut Vec<BaseObservation>,
+        mut metrics: impl FnMut(ColumnEntry<'_, S>) -> CigarMetrics,
+    ) -> Result<Self> {
         let mut accumulator = SnpAccumulator::with_observations(std::mem::take(observations));
         for entry in column.entries() {
             accumulator.push(
                 entry.record(),
                 entry.projection(),
-                CigarMetrics::new(entry.cigar()),
+                metrics(entry),
                 reference_base,
                 config,
             );
@@ -105,7 +126,7 @@ impl SnpEvidence {
                 accumulator.observe_detailed(
                     entry.record(),
                     entry.projection(),
-                    CigarMetrics::new(entry.cigar()),
+                    metrics(entry),
                     reference_base,
                     config,
                 );
@@ -315,7 +336,30 @@ impl SnpSiteBuilder {
         &mut self,
         column: &Column<'_>,
         reference_base: Nucleotide,
+        sample_index: impl FnMut(u32, &RawRecord) -> Result<Option<usize>>,
+    ) -> Result<LikelihoodSite> {
+        self.build_with(column, reference_base, sample_index, |entry| {
+            CigarMetrics::new(entry.cigar())
+        })
+    }
+
+    pub(crate) fn build_with_record_state(
+        &mut self,
+        column: &Column<'_, PileupRecordState>,
+        reference_base: Nucleotide,
+        sample_index: impl FnMut(u32, &RawRecord) -> Result<Option<usize>>,
+    ) -> Result<LikelihoodSite> {
+        self.build_with(column, reference_base, sample_index, |entry| {
+            entry.state().cigar(entry.cigar())
+        })
+    }
+
+    fn build_with<S>(
+        &mut self,
+        column: &Column<'_, S>,
+        reference_base: Nucleotide,
         mut sample_index: impl FnMut(u32, &RawRecord) -> Result<Option<usize>>,
+        mut metrics: impl FnMut(ColumnEntry<'_, S>) -> CigarMetrics,
     ) -> Result<LikelihoodSite> {
         for sample in &mut self.samples {
             sample.clear();
@@ -335,7 +379,7 @@ impl SnpSiteBuilder {
             sample.push(
                 entry.record(),
                 entry.projection(),
-                CigarMetrics::new(entry.cigar()),
+                metrics(entry),
                 reference_base,
                 self.config,
             );
@@ -353,7 +397,7 @@ impl SnpSiteBuilder {
                 self.samples[sample].observe_detailed(
                     entry.record(),
                     entry.projection(),
-                    CigarMetrics::new(entry.cigar()),
+                    metrics(entry),
                     reference_base,
                     self.config,
                 );
