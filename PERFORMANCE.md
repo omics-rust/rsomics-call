@@ -90,6 +90,42 @@ The Hyperfine JSON and RSS ledger have SHA-256
 `d77775dd8480d44e28f6ef58e49f029c911ce7137975680418c8b7a50801b253`
 and `eedc13e2f8da730ba7c1079ef1be6f6146c5b61f92ad74baf4572deb412da096`.
 
+## Indexed reference consolidation regression gate
+
+Revision `7d7bb20e64a07ac38ae9738691ac87dbf6e9234e` replaces the product-local
+indexed FASTA cache with `rsomics-seqio` 0.6.0. It was compared with published
+release 0.1.1, whose crate records VCS revision
+`7d20d6b119dcaea60638cc7da793bca61a47fedc`. Both binaries were built with
+rustc 1.91.0 and ran the full fused command on the same 5 Mb, 30x fixture.
+
+Both emitted 5,024 calls. Their raw BCF output was byte-identical with SHA-256
+`6c1e4e96ac3c1a7a8b8268364473585f22438c0ca552ece8dad9ec44b4d05c81`; the
+normalized call projection also retained the release checksum
+`f5b6f9d78aba94c81d4c263acc969bafbf19284b278dc1d239915326d2ac43ee`.
+
+Hyperfine 1.20.0 ran one warm-up followed by two order-reversed batches of five
+runs per binary on an Apple M2 Mac14,3 with 8 GiB RAM and macOS 26.6.1 build
+25G76.
+
+| Batch | Candidate mean | Published 0.1.1 mean |
+|---|---:|---:|
+| Candidate first | 14.698 ± 0.096 s | 14.778 ± 0.133 s |
+| Baseline first | 14.666 ± 0.089 s | 14.702 ± 0.053 s |
+| Combined | 14.682 s | 14.740 s |
+
+Three alternating `/usr/bin/time -lp` rounds gave candidate mean and maximum
+RSS of 21,561,344 and 23,363,584 bytes, versus 21,949,099 and 23,805,952 bytes
+for 0.1.1. The timing and memory ranges overlap; this gate establishes no
+regression and does not support a speed or memory improvement claim.
+
+The candidate and baseline binary SHA-256 values were respectively
+`3e57562efffbd942a456fadfc0894e0743ee4bdc8b664dc8c3ebfaf1682bc46a`
+and `09a1a82cb58c47714e23f43beb2121a2652acd6c38fcf649492e4edd933a6da4`.
+The forward Hyperfine JSON, reverse Hyperfine JSON, and RSS ledger have SHA-256
+`4cae632c3f721a153e94299acbd1c87b5f7768c40fc84bd05fa1c789d40c9a53`,
+`6bee43c9e4e14746cb7b3c579579e6ea2646a10325190fa872ffccc94c783e33`, and
+`cd751f26926b22bda5e5b143412646de3f672176f906fe5cfd0ff51d04d437ed`.
+
 ## Reproduction
 
 `benchmarks/call-vs-bcftools.sh` records the machine, tool versions, binary and
