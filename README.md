@@ -22,7 +22,9 @@ rsomics-call run -f reference.fa alignments.bam -v -Ob -o calls.bcf
 ```
 
 All three commands use the shared `rsomics-help` command tree and
-`rsomics-common` result and output contracts. Variant data may stream to
+`rsomics-common` result and output contracts. BED, VCF, and tabular region
+files use the shared `rsomics-intervals` coordinate contract. Variant data may
+stream to
 standard output, while named outputs are committed transactionally. `--json`
 requires named variant output so the machine result envelope remains a
 separate standard-output stream.

@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-call"
-version = "0.1.2"
+version = "0.1.3"
 description = "Typed alignment likelihood and small-variant calling workflow"
 edition = "2024"
 rust-version = "1.91"
@@ -18,12 +18,12 @@ doctest = false
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 noodles = { version = "0.110", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "tabix", "vcf"] }
 noodles-util = { version = "0.79", features = ["variant"] }
 rsomics-bamio = { version = "0.8", default-features = false }
 rsomics-common = "0.12"
 rsomics-help = "0.4"
+rsomics-intervals = "0.4"
 rsomics-pileup = "0.9"
 rsomics-seqio = "0.6"
 same-file = "1"
@@ -31,4 +31,5 @@ smallvec = "1"
 thiserror = "2"
 
 [dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tempfile = "3"
