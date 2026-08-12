@@ -42,6 +42,10 @@ jobs:
         if: matrix.target == 'linux-x86_64'
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Benchmark harness syntax
+        if: matrix.target == 'linux-x86_64'
+        run: bash -n benchmarks/*.sh
+
       - name: Package
         if: matrix.target == 'linux-x86_64'
         run: cargo package --locked
@@ -51,3 +55,33 @@ jobs:
 
       - name: Test release
         run: cargo test --locked --release --all-targets --all-features
+
+      - name: Install bcftools oracle dependencies
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbz2-dev libcurl4-openssl-dev liblzma-dev libssl-dev zlib1g-dev
+
+      - name: Build bcftools 1.24 oracle
+        if: matrix.target == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/bcftools-1.24.tar.bz2"
+          curl --fail --location --retry 3 \
+            https://github.com/samtools/bcftools/releases/download/1.24/bcftools-1.24.tar.bz2 \
+            --output "$archive"
+          echo "8caddc22610ee2851666047c859bb91da0c1e32d0c2ec553db6f153ad130e46f  $archive" \
+            | shasum -a 256 --check
+          tar -xjf "$archive" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/bcftools-1.24"
+          ./configure --without-curses
+          make -j2
+          echo "$RUNNER_TEMP/bcftools-1.24" >> "$GITHUB_PATH"
+
+      - name: Test compatibility oracle
+        if: matrix.target == 'linux-x86_64'
+        run: |
+          test "$(bcftools --version | sed -n '1p')" = "bcftools 1.24"
+          cargo test --locked --test compat -- --ignored
+          cargo test --locked --test cli -- --ignored
