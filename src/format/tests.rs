@@ -249,6 +249,52 @@ fn roundtrips_complete_pileup_annotations() {
 }
 
 #[test]
+fn decodes_missing_quality_mean_as_zero() {
+    let samples = Samples::new(
+        Keys::from_iter([PL, DP, ADF, ADR, AD, QUALITY_SUM, QM].map(str::to_owned)),
+        vec![vec![
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(0),
+                Some(10),
+                Some(20),
+            ]))),
+            Some(SampleValue::Integer(1)),
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(1),
+                Some(0),
+            ]))),
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(0),
+                Some(0),
+            ]))),
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(1),
+                Some(0),
+            ]))),
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(40),
+                Some(0),
+            ]))),
+            Some(SampleValue::Array(SampleArray::Integer(vec![
+                Some(60),
+                None,
+            ]))),
+        ]],
+    );
+
+    let sample = decode_sample(&samples, 0, 2).unwrap();
+
+    assert_eq!(
+        sample
+            .evidence()
+            .annotations()
+            .unwrap()
+            .allele_quality_means(),
+        [60, 0]
+    );
+}
+
+#[test]
 fn preserves_indel_summary_in_likelihood_and_called_records() {
     let schema = LikelihoodVcfSchema::new([(b"MX".as_slice(), 11)], ["sample"]).unwrap();
     let site = LikelihoodSite::new(
