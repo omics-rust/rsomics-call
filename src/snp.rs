@@ -571,7 +571,7 @@ fn index_to_nibble(index: usize) -> usize {
 }
 
 fn nucleotide_byte(base: Nucleotide) -> u8 {
-    [b'A', b'C', b'G', b'T', b'N'][base as usize]
+    b"ACGTN"[base as usize]
 }
 
 fn checked_counts(values: [u64; 5]) -> Result<[u32; 5]> {

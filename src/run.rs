@@ -909,8 +909,8 @@ mod tests {
         };
 
         for (run, expected_reference) in [
-            (open(Some(&reference)).unwrap(), [b'C', b'A']),
-            (open(None).unwrap(), [b'N', b'N']),
+            (open(Some(&reference)).unwrap(), *b"CA"),
+            (open(None).unwrap(), *b"NN"),
         ] {
             let mut sites = Vec::new();
             run.run(|site| {
