@@ -25,6 +25,7 @@ rsomics-bamio = { version = "0.8", default-features = false }
 rsomics-common = "0.12"
 rsomics-help = "0.4"
 rsomics-pileup = "0.9"
+rsomics-seqio = "0.6"
 same-file = "1"
 smallvec = "1"
 thiserror = "2"

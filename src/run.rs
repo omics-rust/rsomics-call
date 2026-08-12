@@ -1,12 +1,8 @@
-use std::fs::File;
 use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use noodles::{
-    core::{Position, Region},
-    fasta,
-};
+use noodles::core::Region;
 use rsomics_pileup::{BaqOptions, PileupEngine, PileupOptions};
 
 use crate::{
@@ -494,18 +490,14 @@ fn drain_sites(
 }
 
 struct ReferenceCache {
-    reader: fasta::io::IndexedReader<fasta::io::BufReader<File>>,
+    reader: rsomics_seqio::IndexedFasta,
     path: PathBuf,
     references: Box<[(Box<[u8]>, u64)]>,
-    reference_id: Option<usize>,
-    sequence_start: usize,
-    sequence: Vec<u8>,
 }
 
 impl ReferenceCache {
     fn open(path: &Path, references: &[ReferenceSequence]) -> Result<Self> {
-        let reader = fasta::io::indexed_reader::Builder::default()
-            .build_from_path(path)
+        let reader = rsomics_seqio::IndexedFasta::open(path)
             .map_err(|error| reference_error(path, error))?;
         Ok(Self {
             reader,
@@ -519,9 +511,6 @@ impl ReferenceCache {
                     )
                 })
                 .collect(),
-            reference_id: None,
-            sequence_start: 0,
-            sequence: Vec::new(),
         })
     }
 
@@ -553,55 +542,16 @@ impl ReferenceCache {
     }
 
     fn sequence(&mut self, reference_id: i32, range: Range<usize>) -> Result<&[u8]> {
-        const CHUNK_SIZE: usize = 1024 * 1024;
-
         let reference_id =
             usize::try_from(reference_id).map_err(|error| reference_error(&self.path, error))?;
-        let (name, length) = self
+        let name = self
             .references
             .get(reference_id)
-            .map(|(name, length)| (name.to_vec(), *length))
+            .map(|(name, _)| name.as_ref())
             .ok_or_else(|| reference_error(&self.path, "reference ID is absent"))?;
-        let length = usize::try_from(length).map_err(|error| reference_error(&self.path, error))?;
-        if range.start >= range.end || range.end > length {
-            return Err(reference_error(
-                &self.path,
-                "requested reference range is invalid",
-            ));
-        }
-        if self.reference_id != Some(reference_id)
-            || range.start < self.sequence_start
-            || range.end > self.sequence_start + self.sequence.len()
-        {
-            let start = range.start / CHUNK_SIZE * CHUNK_SIZE;
-            let chunk_end = start
-                .checked_add(CHUNK_SIZE)
-                .map_or(length, |end| end.min(length));
-            let end = chunk_end.max(range.end);
-            let interval_start = Position::try_from(start + 1)
-                .map_err(|error| reference_error(&self.path, error))?;
-            let interval_end =
-                Position::try_from(end).map_err(|error| reference_error(&self.path, error))?;
-            let record = self
-                .reader
-                .query(&Region::new(name, interval_start..=interval_end))
-                .map_err(|error| reference_error(&self.path, error))?;
-            self.sequence.clear();
-            self.sequence.extend_from_slice(record.sequence().as_ref());
-            self.reference_id = Some(reference_id);
-            self.sequence_start = start;
-        }
-        let start = range
-            .start
-            .checked_sub(self.sequence_start)
-            .ok_or_else(|| reference_error(&self.path, "invalid reference cache position"))?;
-        let end = range
-            .end
-            .checked_sub(self.sequence_start)
-            .ok_or_else(|| reference_error(&self.path, "invalid reference cache position"))?;
-        self.sequence
-            .get(start..end)
-            .ok_or_else(|| reference_error(&self.path, "reference range is outside the cache"))
+        self.reader
+            .fetch(name, range)
+            .map_err(|error| reference_error(&self.path, error))
     }
 }
 
@@ -614,7 +564,7 @@ fn reference_error(path: &Path, error: impl std::fmt::Display) -> CallError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, File};
     use std::io::Write;
 
     use noodles::sam::alignment::io::Write as _;
@@ -716,6 +666,25 @@ mod tests {
             .unwrap();
         }
         file
+    }
+
+    #[test]
+    fn reference_windows_use_shared_indexed_fasta_ranges() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference = directory.path().join("reference.fa");
+        fs::write(&reference, b">chr1\nACGTA\nCGTAC\nGTACG\nTACGT\n").unwrap();
+        fs::write(reference.with_extension("fa.fai"), b"chr1\t20\t6\t5\t6\n").unwrap();
+        let alignment = sam_file("sample", 'A');
+        let alignments = AlignmentSet::open(
+            [AlignmentInput::new(1, alignment.path(), "input")],
+            Some(&reference),
+            SampleSelection::default(),
+        )
+        .unwrap();
+        let mut cache = ReferenceCache::open(&reference, alignments.reference_sequences()).unwrap();
+
+        assert_eq!(cache.sequence(0, 3..8).unwrap(), b"TACGT");
+        assert_eq!(cache.sequence(0, 6..9).unwrap(), b"GTA");
     }
 
     #[test]

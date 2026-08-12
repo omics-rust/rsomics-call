@@ -684,6 +684,7 @@ dependencies = [
  "rsomics-common",
  "rsomics-help",
  "rsomics-pileup",
+ "rsomics-seqio",
  "same-file",
  "smallvec",
  "tempfile",
@@ -721,6 +722,20 @@ checksum = "beae57811926a88c28ee0de8923dc7edb8d87ffe9c0afba9b47bd771a279f39e"
 dependencies = [
  "rsomics-bamio",
  "thiserror",
+]
+
+[[package]]
+name = "rsomics-seqio"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18923c9db5cb7ee3429681c889fd40a5c207a9f0782ae5859e5446d58eaa817d"
+dependencies = [
+ "crossbeam-channel",
+ "flate2",
+ "noodles-bgzf",
+ "noodles-core",
+ "noodles-fasta",
+ "rsomics-common",
 ]
 
 [[package]]
