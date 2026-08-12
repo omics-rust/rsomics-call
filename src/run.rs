@@ -1518,7 +1518,7 @@ mod tests {
                 .annotations()
                 .unwrap()
                 .allele_quality_means(),
-            [i32::MAX as u32, 31]
+            [0, 31]
         );
         assert_eq!(
             drop.samples()[0].phred_likelihoods(),

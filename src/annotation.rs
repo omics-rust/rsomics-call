@@ -313,7 +313,7 @@ impl AnnotationEvidence {
             .iter()
             .map(|&allele| {
                 let depth = self.forward[allele] + self.reverse[allele];
-                if depth == 0 {
+                if depth == 0 || self.error_sums[allele] == 0.0 {
                     0
                 } else {
                     (-4.3429 * (self.error_sums[allele] / depth as f64).ln() + 0.499)

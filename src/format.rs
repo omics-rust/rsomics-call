@@ -1454,8 +1454,8 @@ fn decode_sample(samples: &Samples, index: usize, allele_count: usize) -> Result
         (Some(forward), Some(reverse))
             if forward.len() == allele_count && reverse.len() == allele_count =>
         {
-            let quality_means = sample_integer_array_with_missing(samples, QM, index, Some(0))?
-                .unwrap_or_else(|| vec![0; allele_count]);
+            let quality_means =
+                sample_quality_mean_array(samples, index)?.unwrap_or_else(|| vec![0; allele_count]);
             if quality_means.len() != allele_count {
                 return Err(invalid("FORMAT/QM does not match the record alleles"));
             }
@@ -1588,15 +1588,6 @@ fn sample_integer(samples: &Samples, key: &str, index: usize) -> Result<Option<u
 }
 
 fn sample_integer_array(samples: &Samples, key: &str, index: usize) -> Result<Option<Vec<u32>>> {
-    sample_integer_array_with_missing(samples, key, index, None)
-}
-
-fn sample_integer_array_with_missing(
-    samples: &Samples,
-    key: &str,
-    index: usize,
-    missing: Option<i32>,
-) -> Result<Option<Vec<u32>>> {
     let Some(series) = samples.select(key) else {
         return Ok(None);
     };
@@ -1606,7 +1597,6 @@ fn sample_integer_array_with_missing(
             .iter()
             .map(|value| {
                 let value = value
-                    .or(missing)
                     .ok_or_else(|| invalid(format!("FORMAT/{key} contains a missing value")))?;
                 u32::try_from(value)
                     .map_err(|_| invalid(format!("FORMAT/{key} contains a negative integer")))
@@ -1614,6 +1604,26 @@ fn sample_integer_array_with_missing(
             .collect::<Result<Vec<_>>>()
             .map(Some),
         Some(Some(_)) => Err(invalid(format!("FORMAT/{key} is not an integer array"))),
+        None => Err(invalid("record sample fields are truncated")),
+    }
+}
+
+fn sample_quality_mean_array(samples: &Samples, index: usize) -> Result<Option<Vec<u32>>> {
+    let Some(series) = samples.select(QM) else {
+        return Ok(None);
+    };
+    match series.get(index) {
+        Some(None) => Ok(None),
+        Some(Some(SampleValue::Array(SampleArray::Integer(values)))) => values
+            .iter()
+            .map(|value| match value {
+                None | Some(i32::MAX) => Ok(0),
+                Some(value) => u32::try_from(*value)
+                    .map_err(|_| invalid("FORMAT/QM contains a negative integer")),
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+        Some(Some(_)) => Err(invalid("FORMAT/QM is not an integer array")),
         None => Err(invalid("record sample fields are truncated")),
     }
 }
